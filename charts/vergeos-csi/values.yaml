@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/verge-io/csi-vergeos
+  repository: ghcr.io/encore-platform-engineering/csi-vergeos
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
@@ -31,7 +31,7 @@ nas:
 # Block driver settings
 block:
   enabled: true
-  poolVmId: "0"
+  poolVmId: ""  # required when block.enabled (VergeOS VM $key)
   storageClass:
     enabled: true
     name: vergeos-block

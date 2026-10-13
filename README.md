@@ -138,7 +138,7 @@ Key Helm values:
 | `vergeos.existingSecret` | | Use a pre-created Secret instead |
 | `nas.enabled` | `true` | Deploy the NAS driver |
 | `block.enabled` | `true` | Deploy the Block driver |
-| `block.poolVmId` | `0` | VergeOS VM ID to hold idle block drives |
+| `block.poolVmId` | | **Required** when block is enabled. VergeOS VM ID to hold idle block drives |
 | `nas.storageClass.nasServiceName` | `k8s-nas` | VergeOS NAS service name |
 | `kubeletDir` | `/var/lib/kubelet` | Kubelet root dir on nodes. Set to `/var/lib/k0s/kubelet` on k0s |
 | `logLevel` | `5` | klog verbosity (0–10) |
