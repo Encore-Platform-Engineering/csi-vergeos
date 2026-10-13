@@ -20,9 +20,13 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      - name: Chart requires block.poolVmId
+        run: |
+          ! helm template x charts/vergeos-csi
+          helm template x charts/vergeos-csi --set block.poolVmId=1 > /dev/null
       - name: Chart has no hardcoded kubelet dir
         run: |
-          helm template x charts/vergeos-csi --set kubeletDir=/var/lib/k0s/kubelet > /tmp/k0s.yaml
+          helm template x charts/vergeos-csi --set block.poolVmId=1 --set kubeletDir=/var/lib/k0s/kubelet > /tmp/k0s.yaml
           ! grep -q '/var/lib/kubelet' /tmp/k0s.yaml
 
   image:

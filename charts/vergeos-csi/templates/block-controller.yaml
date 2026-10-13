@@ -29,7 +29,7 @@ spec:
             - "--driver=block"
             - "--mode=controller"
             - "--endpoint=unix:///csi/csi.sock"
-            - "--pool-vm-id={{ .Values.block.poolVmId }}"
+            - "--pool-vm-id={{ include "vergeos-csi.poolVmId" . }}"
             - "--v={{ .Values.logLevel }}"
           envFrom:
             - secretRef:
