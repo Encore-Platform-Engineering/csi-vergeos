@@ -29,3 +29,58 @@
 {{- if eq $id "0" -}}{{- fail "block.poolVmId must not be 0: set it to the pool VM $key, or block.enabled=false" -}}{{- end -}}
 {{- $id -}}
 {{- end }}
+
+{{/* Private VergeOS root CA: inline caBundle xor existing caSecret. Renders "true" when set. */}}
+{{- define "vergeos-csi.caEnabled" -}}
+{{- if and .Values.vergeos.caBundle .Values.vergeos.caSecret -}}
+{{- fail "set only one of vergeos.caBundle and vergeos.caSecret" -}}
+{{- end -}}
+{{- if or .Values.vergeos.caBundle .Values.vergeos.caSecret -}}true{{- end -}}
+{{- end -}}
+
+{{- define "vergeos-csi.caConfigMapName" -}}
+{{- printf "%s-ca" (include "vergeos-csi.name" .) -}}
+{{- end -}}
+
+{{/* Pod-template annotation: rolls controller pods when the CA changes. */}}
+{{- define "vergeos-csi.caAnnotations" -}}
+{{- if eq (include "vergeos-csi.caEnabled" .) "true" -}}
+checksum/vergeos-ca: {{ ternary .Values.vergeos.caBundle (printf "secret/%s/%s" .Values.vergeos.caSecret (.Values.vergeos.caSecretKey | default "ca.crt")) (not (empty .Values.vergeos.caBundle)) | sha256sum }}
+{{- end -}}
+{{- end -}}
+
+{{/* Container env: SSL_CERT_FILE makes Go (govergeos) trust the mounted CA. */}}
+{{- define "vergeos-csi.caEnv" -}}
+{{- if eq (include "vergeos-csi.caEnabled" .) "true" -}}
+env:
+  - name: SSL_CERT_FILE
+    value: /etc/vergeos/ca.crt
+{{- end -}}
+{{- end -}}
+
+{{- define "vergeos-csi.caVolumeMount" -}}
+{{- if eq (include "vergeos-csi.caEnabled" .) "true" -}}
+- name: vergeos-ca
+  mountPath: /etc/vergeos/ca.crt
+  subPath: ca.crt
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{- define "vergeos-csi.caVolume" -}}
+{{- if .Values.vergeos.caSecret -}}
+- name: vergeos-ca
+  secret:
+    secretName: {{ .Values.vergeos.caSecret }}
+    items:
+      - key: {{ .Values.vergeos.caSecretKey | default "ca.crt" }}
+        path: ca.crt
+{{- else if .Values.vergeos.caBundle -}}
+- name: vergeos-ca
+  configMap:
+    name: {{ include "vergeos-csi.caConfigMapName" . }}
+    items:
+      - key: ca.crt
+        path: ca.crt
+{{- end -}}
+{{- end -}}

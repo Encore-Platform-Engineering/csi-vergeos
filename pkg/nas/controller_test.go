@@ -833,3 +833,20 @@ func TestCreateVolume_BlockCapabilityRejected(t *testing.T) {
 		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
 	}
 }
+
+func TestCreateVolume_BlockCapabilityRejected_SingleNodeWriter(t *testing.T) {
+	c, _, volMock, _ := newTestController()
+	volMock.createFn = func(_ context.Context, _ *vergeos.VolumeCreateRequest) (*vergeos.Volume, error) {
+		t.Error("no volume may be created for a block-mode capability")
+		return nil, fmt.Errorf("unexpected")
+	}
+	req := createReqWithParams(map[string]string{"nasServiceName": "k8s-nas", "allowedHosts": "10.0.0.0/24"})
+	req.VolumeCapabilities = []*csi.VolumeCapability{{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+	}}
+	_, err := c.CreateVolume(context.Background(), req)
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
+	}
+}

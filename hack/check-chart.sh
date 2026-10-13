@@ -83,4 +83,39 @@ render --set nas.storageClass.allowAll=true > /tmp/chart-allowall.yaml
 q /tmp/chart-allowall.yaml "$nassc | select(.allowAll == \"true\" and .allowedHosts == null)" >/dev/null || fail "allowAll=true must render allowAll and no allowedHosts"
 q deploy/kubernetes/storageclass.yaml 'select(.provisioner=="csi-nas.verge.io") | .parameters | select(.allowedHosts != null)' >/dev/null || fail "deploy NAS StorageClass lacks allowedHosts"
 
+echo "== private VergeOS CA (caBundle / caSecret)"
+ctl='select(.kind=="Deployment" and (.metadata.name=="x-block-controller" or .metadata.name=="x-nas-controller"))'
+# default: no CA wiring at all
+if yq eval "$ctl | .. | select(has(\"name\")) | .name" /tmp/chart-default.yaml | gq -E '^(vergeos-ca|SSL_CERT_FILE)$'; then
+  fail "CA volume/env rendered without caBundle/caSecret"
+fi
+if yq eval 'select(.kind=="ConfigMap") | .metadata.name' /tmp/chart-default.yaml | gq -x x-ca; then fail "CA ConfigMap rendered by default"; fi
+render --set-file vergeos.caBundle=hack/testdata/ca.pem > /tmp/chart-cabundle.yaml
+render --set vergeos.caSecret=my-ca --set vergeos.caSecretKey=root.pem > /tmp/chart-casecret.yaml
+for f in /tmp/chart-cabundle.yaml /tmp/chart-casecret.yaml; do
+  for d in x-block-controller x-nas-controller; do
+    dep="select(.kind==\"Deployment\" and .metadata.name==\"$d\")"
+    c="$dep | .spec.template.spec.containers[] | select(.name==\"csi-vergeos\")"
+    q $f "$c | .env[] | select(.name==\"SSL_CERT_FILE\" and .value==\"/etc/vergeos/ca.crt\")" >/dev/null || fail "$f $d: SSL_CERT_FILE"
+    q $f "$c | .volumeMounts[] | select(.name==\"vergeos-ca\" and .mountPath==\"/etc/vergeos/ca.crt\" and .readOnly==true)" >/dev/null || fail "$f $d: CA mount"
+    q $f "$dep | .spec.template.metadata.annotations.\"checksum/vergeos-ca\"" >/dev/null || fail "$f $d: checksum annotation"
+    # credentials envFrom is kept
+    q $f "$c | .envFrom[].secretRef.name" >/dev/null || fail "$f $d: envFrom lost"
+  done
+done
+for d in x-block-controller x-nas-controller; do
+  q /tmp/chart-cabundle.yaml "select(.kind==\"Deployment\" and .metadata.name==\"$d\") | .spec.template.spec.volumes[] | select(.name==\"vergeos-ca\" and .configMap.name==\"x-ca\")" >/dev/null || fail "$d: caBundle volume"
+  q /tmp/chart-casecret.yaml "select(.kind==\"Deployment\" and .metadata.name==\"$d\") | .spec.template.spec.volumes[] | select(.name==\"vergeos-ca\" and .secret.secretName==\"my-ca\" and .secret.items[0].key==\"root.pem\" and .secret.items[0].path==\"ca.crt\")" >/dev/null || fail "$d: caSecret volume"
+done
+q /tmp/chart-cabundle.yaml 'select(.kind=="ConfigMap" and .metadata.name=="x-ca") | .data."ca.crt"' | gq 'BEGIN CERTIFICATE' || fail "caBundle not rendered into ConfigMap x-ca"
+if yq eval 'select(.kind=="ConfigMap") | .metadata.name' /tmp/chart-casecret.yaml | gq -x x-ca; then fail "caSecret must not render a CA ConfigMap"; fi
+# a changed caBundle changes the checksum (rolls pods)
+render --set-file vergeos.caBundle=hack/testdata/ca2.pem > /tmp/chart-cabundle2.yaml
+a=$(yq eval 'select(.metadata.name=="x-block-controller") | .spec.template.metadata.annotations."checksum/vergeos-ca"' /tmp/chart-cabundle.yaml)
+b=$(yq eval 'select(.metadata.name=="x-block-controller") | .spec.template.metadata.annotations."checksum/vergeos-ca"' /tmp/chart-cabundle2.yaml)
+[ -n "$a" ] && [ "$a" != "$b" ] || fail "checksum/vergeos-ca did not change with caBundle"
+# mutually exclusive; block-disabled still renders for NAS
+if render --set vergeos.caBundle=x --set vergeos.caSecret=y >/dev/null 2>&1; then fail "caBundle + caSecret must be rejected"; fi
+render --set block.enabled=false --set vergeos.caSecret=my-ca | yq eval 'select(.metadata.name=="x-nas-controller") | .spec.template.spec.volumes[].name' - | gq -x vergeos-ca || fail "NAS-only CA volume"
+
 echo OK

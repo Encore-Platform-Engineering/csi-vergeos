@@ -466,7 +466,7 @@ func (c *BlockController) ValidateVolumeCapabilities(_ context.Context, req *csi
 	if len(req.VolumeCapabilities) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume capabilities are required")
 	}
-	// Block supports single-node, filesystem-mode volumes only.
+	// Block supports single-node volumes (filesystem or raw block mode).
 	for _, cap := range req.VolumeCapabilities {
 		if msg := unsupportedCapability(cap); msg != "" {
 			return &csi.ValidateVolumeCapabilitiesResponse{Message: msg}, nil
@@ -481,17 +481,19 @@ func (c *BlockController) ValidateVolumeCapabilities(_ context.Context, req *csi
 
 // unsupportedCapability returns why cap cannot be served by the block driver,
 // or "" if it is supported. A drive can be attached to one VM at a time, so
-// only SINGLE_NODE_* access modes are allowed; raw block mode is not
-// implemented by the node plugin.
+// only SINGLE_NODE_* access modes are allowed. Raw block mode (volumeMode:
+// Block) is allowed, except SINGLE_NODE_READER_ONLY: the node plugin hands the
+// device node to the pod by bind mount, and a read-only bind mount does not
+// stop writes to a device node.
 func unsupportedCapability(cap *csi.VolumeCapability) string {
 	if cap == nil {
 		return "volume capability is nil"
 	}
-	if cap.GetBlock() != nil {
-		return "block driver does not support raw block volume mode"
-	}
 	if cap.AccessMode == nil {
 		return "access mode is required"
+	}
+	if cap.GetBlock() != nil && cap.AccessMode.Mode == csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY {
+		return "block driver does not support read-only raw block volumes"
 	}
 	switch cap.AccessMode.Mode {
 	case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
