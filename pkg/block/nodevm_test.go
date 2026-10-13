@@ -124,7 +124,7 @@ func TestPublishUnpublish_ByUUIDNodeID(t *testing.T) {
 	vm := vergeos.VM{ID: 77, UUID: testVMUUID, Name: testVMName, Machine: 770}
 	c, _ := nodeVMController(vm)
 	drives := c.vmDrives.(*mockVMDriveClient)
-	drives.drives[100] = &vergeos.VMDrive{ID: 100, Serial: "csi-abc", Machine: 10, PowerState: "online"}
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-pvc", Serial: "csi-abc", Machine: 10}
 
 	ctx := context.Background()
 	if _, err := c.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{
@@ -172,20 +172,38 @@ func TestResolveNodeVM_APIErrorIsUnavailable(t *testing.T) {
 	}
 }
 
-// The drive is attached to a VM resolved from the node ID at publish time; at
-// unpublish the node ID may differ (e.g. name: -> uuid: after re-registration),
-// so the unplug must target the VM that owns the drive.
-func TestUnpublish_UnplugsOwnerVMNotNodeID(t *testing.T) {
+// The node ID may differ between publish and unpublish (e.g. name: -> uuid:
+// after re-registration) but must still resolve to the VM that owns the drive;
+// that VM is the one unplugged.
+func TestUnpublish_NodeIDResolvingToOwnerUnplugsIt(t *testing.T) {
 	owner := vergeos.VM{ID: 77, UUID: testVMUUID, Name: testVMName, Machine: 770}
-	bystander := vergeos.VM{ID: 78, Name: "stale-name", Machine: 780}
-	c, filters := nodeVMController(bystander, owner)
+	c, _ := nodeVMController(owner)
 	drives := c.vmDrives.(*mockVMDriveClient)
-	drives.drives[100] = &vergeos.VMDrive{ID: 100, Machine: 770, PowerState: "online"}
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 770, PowerState: "online"}
 	var unplugged []int
 	c.vmDrives = &unplugRecorder{mockVMDriveClient: drives, vmIDs: &unplugged}
 
-	// Node ID names a different VM than the one owning the drive.
-	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100", NodeId: "name:stale-name"}); err != nil {
+	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100", NodeId: "uuid:" + testVMUUID}); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	if len(unplugged) != 1 || unplugged[0] != 77 {
+		t.Errorf("unplugged VMs = %v, want [77]", unplugged)
+	}
+	if drives.drives[100].Machine != 10 {
+		t.Errorf("drive machine = %d, want pool 10", drives.drives[100].Machine)
+	}
+}
+
+// Without a node ID the owner is found via the drive's machine.
+func TestUnpublish_NoNodeIDUnplugsOwnerVM(t *testing.T) {
+	owner := vergeos.VM{ID: 77, Name: testVMName, Machine: 770}
+	c, filters := nodeVMController(owner)
+	drives := c.vmDrives.(*mockVMDriveClient)
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 770, PowerState: "online"}
+	var unplugged []int
+	c.vmDrives = &unplugRecorder{mockVMDriveClient: drives, vmIDs: &unplugged}
+
+	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100"}); err != nil {
 		t.Fatalf("unpublish: %v", err)
 	}
 	if len(unplugged) != 1 || unplugged[0] != 77 {
@@ -212,7 +230,7 @@ func (u *unplugRecorder) HotUnplugDrive(_ context.Context, vmID, _ int) error {
 func TestUnpublish_NoOwnerVMStillDetaches(t *testing.T) {
 	c, _ := nodeVMController() // no VMs at all
 	drives := c.vmDrives.(*mockVMDriveClient)
-	drives.drives[100] = &vergeos.VMDrive{ID: 100, Machine: 770, PowerState: "online"}
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 770, PowerState: "online"}
 	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100"}); err != nil {
 		t.Fatalf("unpublish: %v", err)
 	}
@@ -226,7 +244,7 @@ func TestPublish_AmbiguousNodeIsFailedPrecondition(t *testing.T) {
 		vergeos.VM{ID: 1, Name: testVMName, Machine: 10},
 		vergeos.VM{ID: 2, Name: testVMName, Machine: 20},
 	)
-	c.vmDrives.(*mockVMDriveClient).drives[100] = &vergeos.VMDrive{ID: 100, Machine: 10}
+	c.vmDrives.(*mockVMDriveClient).drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 10}
 	_, err := c.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
 		VolumeId: "100",
 		NodeId:   "name:" + testVMName,
