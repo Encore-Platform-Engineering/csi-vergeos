@@ -418,10 +418,31 @@ func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
 	}
 }
 
+func TestNodePublishVolume_StagingNotMountedFailsPrecondition(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
+	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:          "100",
+		TargetPath:        target,
+		StagingTargetPath: filepath.Join(t.TempDir(), "staging"), // never mounted
+		VolumeCapability:  fsCap("ext4"),
+	})
+	if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition (err=%v)", st.Code(), err)
+	}
+	if len(mounter.mountCalls) != 0 {
+		t.Error("must not bind-mount an unstaged path")
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Error("target directory must not be created when staging is missing")
+	}
+}
+
 func TestNodePublishVolume_FilesystemBindsStaging(t *testing.T) {
 	node, mounter, _ := newTestBlockNode()
 	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
 	staging := filepath.Join(t.TempDir(), "staging")
+	mounter.mountedPaths[staging] = true
 	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
 		VolumeId:          "100",
 		TargetPath:        target,

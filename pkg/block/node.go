@@ -179,6 +179,15 @@ func (n *BlockNode) NodePublishVolume(_ context.Context, req *csi.NodePublishVol
 			return nil, status.Errorf(codes.Internal, "creating target file: %v", err)
 		}
 	} else {
+		// The staged filesystem must be a real mount visible to the kubelet;
+		// otherwise the pod would bind an empty directory.
+		staged, err := n.mounter.IsMounted(req.StagingTargetPath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "checking staging mount status: %v", err)
+		}
+		if !staged {
+			return nil, status.Errorf(codes.FailedPrecondition, "staging path %q is not a mount point: volume is not staged", req.StagingTargetPath)
+		}
 		if err := util.EnsureDirectory(targetPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "creating target directory: %v", err)
 		}
