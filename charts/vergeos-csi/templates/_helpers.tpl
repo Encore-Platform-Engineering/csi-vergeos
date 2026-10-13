@@ -10,8 +10,17 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "vergeos-csi.controllerName" -}}
+{{- printf "%s-controller" (include "vergeos-csi.name" .) -}}
+{{- end -}}
+
+{{- define "vergeos-csi.nodeName" -}}
+{{- printf "%s-node" (include "vergeos-csi.name" .) -}}
+{{- end -}}
+
+{{/* Release images are tagged v<semver> by CI; default tag = v<appVersion>. */}}
 {{- define "vergeos-csi.image" -}}
-{{ .Values.image.repository }}:{{ .Values.image.tag }}
+{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
 {{- end -}}
 
 {{/* block.poolVmId: must be set to a real VM $key (not empty/0). */}}

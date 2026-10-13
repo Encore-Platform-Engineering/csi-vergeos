@@ -119,7 +119,7 @@ helm install vergeos-csi verge-io/vergeos-csi \
   --set block.enabled=false
 ```
 
-On **k0s**, kubelet uses `/var/lib/k0s/kubelet`; add `--set kubeletDir=/var/lib/k0s/kubelet`. The value is used for the plugin socket, registration dir, the `--kubelet-registration-path`, and the Bidirectional pods mount. A mismatch means the node plugin never registers.
+On **k0s**, kubelet uses `/var/lib/k0s/kubelet`; add `--set kubeletDir=/var/lib/k0s/kubelet`. The value is used for the plugin socket, registration dir, the `--kubelet-registration-path`, and the Bidirectional pods and `plugins/kubernetes.io/csi` (block staging) mounts. A mismatch means the node plugin never registers.
 
 Verify:
 
@@ -141,11 +141,17 @@ Key Helm values:
 | `block.poolVmId` | | **Required** when block is enabled. VergeOS VM ID to hold idle block drives |
 | `nas.storageClass.nasServiceName` | `k8s-nas` | VergeOS NAS service name |
 | `kubeletDir` | `/var/lib/kubelet` | Kubelet root dir on nodes. Set to `/var/lib/k0s/kubelet` on k0s |
+| `image.tag` | `v<appVersion>` | Image tag. Empty = `v` + chart `appVersion` (matches the `v*` tags CI pushes) |
+| `node.tolerations` | `[{operator: Exists}]` | Node DaemonSet tolerations (runs on tainted nodes) |
+| `node.priorityClassName` | `system-node-critical` | Node DaemonSet priority class |
+| `controller.tolerations` / `controller.priorityClassName` | empty | Controller Deployment scheduling |
 | `logLevel` | `5` | klog verbosity (0–10) |
 
 ### Raw manifests
 
 The manifests in `deploy/kubernetes/` are **default-kubelet-only** (`/var/lib/kubelet`). They are not templated. For k0s or any other kubelet dir, use the Helm chart (`kubeletDir`) or generate manifests with `helm template --set kubeletDir=<dir> charts/vergeos-csi`.
+
+Images are pinned to `ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.0`. The node DaemonSet has its own ServiceAccount (`get nodes` only) and does not receive the VergeOS credentials Secret; only the controllers do.
 
 Apply the manifests in `deploy/kubernetes/` directly. You'll need to create a `vergeos-credentials` Secret manually:
 
@@ -163,12 +169,13 @@ kubectl apply -f deploy/kubernetes/
 make build            # Local binary → bin/csi-vergeos
 make build-linux      # Cross-compile for Linux amd64
 make docker-build     # Container image (linux/amd64, local)
-make docker-push      # Build and push to ghcr.io/verge-io/csi-vergeos
+make docker-push      # Build and push to ghcr.io/encore-platform-engineering/csi-vergeos
 make test             # All tests with -race
-
-CI (`.github/workflows/ci.yml`) runs `go vet`, `go test` and a `docker build` on every PR. Pushing a `v*` tag also pushes `ghcr.io/encore-platform-engineering/csi-vergeos:<tag>`.
 go vet ./...          # Static analysis
+hack/check-chart.sh   # helm template / raw manifest assertions (needs helm, yq)
 ```
+
+CI (`.github/workflows/ci.yml`) runs `go vet`, `go test`, `hack/check-chart.sh` and a `docker build` on every PR. Pushing a `v*` tag also pushes `ghcr.io/encore-platform-engineering/csi-vergeos:<tag>`; the chart default image tag is `v<appVersion>`, so bump `appVersion` and the raw manifests' tag together with the release tag.
 
 ## Configuration
 

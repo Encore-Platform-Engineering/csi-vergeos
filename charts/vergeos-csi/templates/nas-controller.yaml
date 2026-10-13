@@ -16,7 +16,14 @@ spec:
       labels:
         app: {{ include "vergeos-csi.name" . }}-nas-controller
     spec:
-      serviceAccountName: {{ include "vergeos-csi.name" . }}
+      serviceAccountName: {{ include "vergeos-csi.controllerName" . }}
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -33,6 +40,18 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "vergeos-csi.secretName" . }}
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -60,6 +79,7 @@ spec:
           image: {{ .Values.sidecars.liveness.image }}
           args:
             - "--csi-address=/csi/csi.sock"
+            - "--http-endpoint=:9808"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

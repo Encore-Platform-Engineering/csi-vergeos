@@ -15,12 +15,15 @@ spec:
       labels:
         app: csi-vergeos-node
     spec:
-      serviceAccountName: csi-vergeos
+      serviceAccountName: csi-vergeos-node
       hostNetwork: false
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
       containers:
         # --- NAS Node Driver ---
         - name: csi-vergeos-nas
-          image: vergeio/csi-vergeos:latest
+          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.0
           args:
             - "--driver=nas"
             - "--mode=node"
@@ -32,9 +35,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          envFrom:
-            - secretRef:
-                name: vergeos-credentials
+          ports:
+            - name: healthz-nas
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz-nas
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           securityContext:
             privileged: true
           volumeMounts:
@@ -52,7 +64,7 @@ spec:
 
         # --- Block Node Driver ---
         - name: csi-vergeos-block
-          image: vergeio/csi-vergeos:latest
+          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.0
           args:
             - "--driver=block"
             - "--mode=node"
@@ -64,9 +76,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          envFrom:
-            - secretRef:
-                name: vergeos-credentials
+          ports:
+            - name: healthz-block
+              containerPort: 9809
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz-block
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           securityContext:
             privileged: true
           volumeMounts:
@@ -74,6 +95,10 @@ spec:
               mountPath: /csi-block
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            # NodeStageVolume mounts under here; must propagate to the host.
+            - name: csi-staging-dir
+              mountPath: /var/lib/kubelet/plugins/kubernetes.io/csi
               mountPropagation: Bidirectional
             - name: device-dir
               mountPath: /dev
@@ -123,7 +148,7 @@ spec:
               memory: 64Mi
 
         # --- Liveness Probe (monitors NAS driver) ---
-        - name: liveness-probe
+        - name: liveness-probe-nas
           image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
           args:
             - "--csi-address=/csi-nas/csi.sock"
@@ -178,6 +203,12 @@ spec:
           hostPath:
             path: /var/lib/kubelet/pods
             type: Directory
+
+        # Staging directory (block NodeStageVolume mounts, Bidirectional propagation)
+        - name: csi-staging-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
 
         # Device directory (for block device discovery)
         - name: device-dir

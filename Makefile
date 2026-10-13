@@ -1,6 +1,6 @@
 # CSI Driver for VergeOS
 BINARY_NAME := csi-vergeos
-IMAGE_NAME := ghcr.io/verge-io/csi-vergeos
+IMAGE_NAME := ghcr.io/encore-platform-engineering/csi-vergeos
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GOFLAGS := -ldflags="-s -w -X github.com/verge-io/csi-vergeos/pkg/driver.DriverVersion=$(VERSION)"
 
@@ -30,11 +30,11 @@ lint:
 
 ## Build Docker image for linux/amd64 (local only)
 docker-build:
-	docker buildx build --platform linux/amd64 --provenance=false -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest --load .
+	docker buildx build --platform linux/amd64 --provenance=false -t $(IMAGE_NAME):$(VERSION) --load .
 
 ## Build and push Docker image for linux/amd64
 docker-push:
-	docker buildx build --platform linux/amd64 --provenance=false -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest --push .
+	docker buildx build --platform linux/amd64 --provenance=false -t $(IMAGE_NAME):$(VERSION) --push .
 
 ## Remove build artifacts
 clean:
