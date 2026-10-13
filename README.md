@@ -119,6 +119,8 @@ helm install vergeos-csi verge-io/vergeos-csi \
   --set block.enabled=false
 ```
 
+On **k0s**, kubelet uses `/var/lib/k0s/kubelet`; add `--set kubeletDir=/var/lib/k0s/kubelet`. The value is used for the plugin socket, registration dir, the `--kubelet-registration-path`, and the Bidirectional pods mount. A mismatch means the node plugin never registers.
+
 Verify:
 
 ```bash
@@ -138,9 +140,12 @@ Key Helm values:
 | `block.enabled` | `true` | Deploy the Block driver |
 | `block.poolVmId` | `0` | VergeOS VM ID to hold idle block drives |
 | `nas.storageClass.nasServiceName` | `k8s-nas` | VergeOS NAS service name |
+| `kubeletDir` | `/var/lib/kubelet` | Kubelet root dir on nodes. Set to `/var/lib/k0s/kubelet` on k0s |
 | `logLevel` | `5` | klog verbosity (0–10) |
 
 ### Raw manifests
+
+The manifests in `deploy/kubernetes/` are **default-kubelet-only** (`/var/lib/kubelet`). They are not templated. For k0s or any other kubelet dir, use the Helm chart (`kubeletDir`) or generate manifests with `helm template --set kubeletDir=<dir> charts/vergeos-csi`.
 
 Apply the manifests in `deploy/kubernetes/` directly. You'll need to create a `vergeos-credentials` Secret manually:
 
@@ -160,6 +165,8 @@ make build-linux      # Cross-compile for Linux amd64
 make docker-build     # Container image (linux/amd64, local)
 make docker-push      # Build and push to ghcr.io/verge-io/csi-vergeos
 make test             # All tests with -race
+
+CI (`.github/workflows/ci.yml`) runs `go vet`, `go test` and a `docker build` on every PR. Pushing a `v*` tag also pushes `ghcr.io/encore-platform-engineering/csi-vergeos:<tag>`.
 go vet ./...          # Static analysis
 ```
 
