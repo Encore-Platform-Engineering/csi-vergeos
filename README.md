@@ -140,12 +140,37 @@ Key Helm values:
 | `block.enabled` | `true` | Deploy the Block driver |
 | `block.poolVmId` | | **Required** when block is enabled. VergeOS VM ID to hold idle block drives |
 | `nas.storageClass.nasServiceName` | `k8s-nas` | VergeOS NAS service name |
+| `nas.storageClass.allowedHosts` | RFC1918 ranges | IPs/CIDRs allowed to mount NFS exports. **Narrow to your node subnets** |
+| `nas.storageClass.allowAll` | `false` | Export to every host (insecure; excludes `allowedHosts`) |
+| `nas.storageClass.squash` | `no_root_squash` | `root_squash`, `all_squash` or `no_root_squash` |
 | `kubeletDir` | `/var/lib/kubelet` | Kubelet root dir on nodes. Set to `/var/lib/k0s/kubelet` on k0s |
 | `image.tag` | `v<appVersion>` | Image tag. Empty = `v` + chart `appVersion` (matches the `v*` tags CI pushes) |
 | `node.tolerations` | `[{operator: Exists}]` | Node DaemonSet tolerations (runs on tainted nodes) |
 | `node.priorityClassName` | `system-node-critical` | Node DaemonSet priority class |
 | `controller.tolerations` / `controller.priorityClassName` | empty | Controller Deployment scheduling |
 | `logLevel` | `5` | klog verbosity (0–10) |
+
+### NAS export security
+
+Each PV gets its own NFS share. StorageClass parameters control who may mount it:
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `allowedHosts` | **required** | Comma-separated IPs/CIDRs (your node subnets) that may mount the export |
+| `allowAll` | `false` | `"true"` exports to every host. Mutually exclusive with `allowedHosts` |
+| `squash` | `root_squash` | `root_squash`, `all_squash` or `no_root_squash` |
+
+`CreateVolume` fails with `InvalidArgument` if neither `allowedHosts` nor `allowAll: "true"` is set. Existing shares are never modified.
+
+Default decision: the driver is fail-closed with `root_squash`. The Helm chart and `deploy/` StorageClass ship `allowedHosts` = RFC1918 private ranges and `squash: no_root_squash` so NAS works out of the box: fresh exports are root-owned and `fsGroup` does not apply to NFS, so root-squashed pods could not write. Narrow `allowedHosts` to your node subnets for production. Mount options from the StorageClass `mountOptions` (e.g. `nfsvers=4.1`) are passed to `mount`; `nolock` is only added when you do not choose NFSv4 or set `lock`/`nolock` yourself.
+
+### NAS service auto-creation
+
+`nasServiceVM` creates a NAS service on that VM if `nasServiceName` does not exist. The VergeOS API accepts a service `name`, but the bundled govergeos client cannot set it, so VergeOS derives it from the VM name. Name the VM exactly `nasServiceName`; otherwise `CreateVolume` fails with `FailedPrecondition` (and never creates a second service on that VM). Pre-creating the NAS service is recommended.
+
+### Node volume capabilities
+
+Block volumes support `fsType` `ext4` (default) and `xfs`; other types are rejected with `InvalidArgument`. StorageClass `mountOptions` are passed to the filesystem mount. `volumeMode: Block` is supported on the block driver (device bind-mounted into the pod, never formatted) and rejected by the NAS driver.
 
 ### Raw manifests
 

@@ -13,9 +13,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X github.com/verge-io/csi
 FROM alpine:3.21
 
 # NFS and mount utilities needed by the node plugin.
+# xfsprogs: mkfs.xfs; xfsprogs-extra: xfs_growfs (fsType: xfs).
 RUN apk add --no-cache \
     nfs-utils \
     e2fsprogs \
+    xfsprogs \
+    xfsprogs-extra \
     blkid \
     util-linux
 

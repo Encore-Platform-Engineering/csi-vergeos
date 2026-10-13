@@ -46,6 +46,11 @@ questions:
         description: "Name of the VergeOS NAS service (auto-created if not found)"
         type: string
         default: "k8s-nas"
+      - variable: nas.storageClass.allowedHosts
+        label: Allowed NFS Hosts
+        description: "Comma-separated node IPs/CIDRs allowed to mount NFS exports"
+        type: string
+        default: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
   - variable: block.enabled
     label: Enable Block Driver

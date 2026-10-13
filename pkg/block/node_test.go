@@ -3,7 +3,9 @@ package block
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -18,6 +20,14 @@ type mockBlockMounter struct {
 	formatErr    error
 	mountErr     error
 	unmountErr   error
+
+	formatCalls []mountCall
+	mountCalls  []mountCall
+}
+
+type mountCall struct {
+	source, target, fsType string
+	options                []string
 }
 
 func newMockBlockMounter() *mockBlockMounter {
@@ -29,6 +39,7 @@ func (m *mockBlockMounter) IsMounted(path string) (bool, error) {
 }
 
 func (m *mockBlockMounter) FormatAndMount(source, target, fsType string, options []string) error {
+	m.formatCalls = append(m.formatCalls, mountCall{source, target, fsType, options})
 	if m.formatErr != nil {
 		return m.formatErr
 	}
@@ -37,6 +48,7 @@ func (m *mockBlockMounter) FormatAndMount(source, target, fsType string, options
 }
 
 func (m *mockBlockMounter) Mount(source, target, fsType string, options []string) error {
+	m.mountCalls = append(m.mountCalls, mountCall{source, target, fsType, options})
 	if m.mountErr != nil {
 		return m.mountErr
 	}
@@ -297,5 +309,133 @@ func TestNodeGetCapabilities_Block(t *testing.T) {
 	}
 	if !hasStage {
 		t.Error("block node should advertise STAGE_UNSTAGE_VOLUME")
+	}
+}
+
+func fsCap(fsType string, flags ...string) *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{FsType: fsType, MountFlags: flags}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+	}
+}
+
+func rawBlockCap() *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+	}
+}
+
+func TestNodeStageVolume_FsTypeAndMountFlagsReachMounter(t *testing.T) {
+	for _, tc := range []struct {
+		name, capFs, wantFs string
+		flags               []string
+	}{
+		{"xfs with flags", "xfs", "xfs", []string{"noatime", "nouuid"}},
+		{"ext4 with flags", "ext4", "ext4", []string{"discard"}},
+		{"empty fsType defaults to ext4", "", "ext4", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, mounter, _ := newTestBlockNode()
+			staging := filepath.Join(t.TempDir(), "staging")
+			_, err := node.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+				VolumeId:          "100",
+				StagingTargetPath: staging,
+				PublishContext:    map[string]string{"serial": "csi-abc123"},
+				VolumeCapability:  fsCap(tc.capFs, tc.flags...),
+			})
+			if err != nil {
+				t.Fatalf("NodeStageVolume: %v", err)
+			}
+			if len(mounter.formatCalls) != 1 {
+				t.Fatalf("FormatAndMount calls = %d, want 1", len(mounter.formatCalls))
+			}
+			got := mounter.formatCalls[0]
+			if got.fsType != tc.wantFs || !reflect.DeepEqual(got.options, tc.flags) || got.source != "/dev/sdb" {
+				t.Errorf("FormatAndMount(%+v), want fs=%s flags=%v dev=/dev/sdb", got, tc.wantFs, tc.flags)
+			}
+		})
+	}
+}
+
+func TestNodeStageVolume_UnsupportedFsTypeRejected(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	_, err := node.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "100",
+		StagingTargetPath: filepath.Join(t.TempDir(), "staging"),
+		PublishContext:    map[string]string{"serial": "csi-abc123"},
+		VolumeCapability:  fsCap("ntfs"),
+	})
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
+	}
+	if len(mounter.formatCalls) != 0 {
+		t.Error("device must not be formatted for an unsupported fsType")
+	}
+}
+
+func TestNodeStageVolume_RawBlockNotFormatted(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	staging := filepath.Join(t.TempDir(), "staging")
+	_, err := node.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "100",
+		StagingTargetPath: staging,
+		PublishContext:    map[string]string{"serial": "csi-abc123"},
+		VolumeCapability:  rawBlockCap(),
+	})
+	if err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if len(mounter.formatCalls) != 0 || len(mounter.mountCalls) != 0 {
+		t.Errorf("raw block must not be formatted or mounted at stage: format=%v mount=%v", mounter.formatCalls, mounter.mountCalls)
+	}
+}
+
+func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
+	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:          "100",
+		TargetPath:        target,
+		StagingTargetPath: filepath.Join(t.TempDir(), "staging"),
+		PublishContext:    map[string]string{"serial": "csi-abc123"},
+		VolumeCapability:  rawBlockCap(),
+		Readonly:          true,
+	})
+	if err != nil {
+		t.Fatalf("NodePublishVolume: %v", err)
+	}
+	if len(mounter.mountCalls) != 1 {
+		t.Fatalf("Mount calls = %d, want 1", len(mounter.mountCalls))
+	}
+	got := mounter.mountCalls[0]
+	if got.source != "/dev/sdb" || got.target != target || !reflect.DeepEqual(got.options, []string{"bind", "ro"}) {
+		t.Errorf("Mount(%+v), want device /dev/sdb bind,ro onto %s", got, target)
+	}
+	fi, err := os.Stat(target)
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("raw block target must be a regular file, got %v (err=%v)", fi, err)
+	}
+}
+
+func TestNodePublishVolume_FilesystemBindsStaging(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
+	staging := filepath.Join(t.TempDir(), "staging")
+	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:          "100",
+		TargetPath:        target,
+		StagingTargetPath: staging,
+		VolumeCapability:  fsCap("ext4"),
+	})
+	if err != nil {
+		t.Fatalf("NodePublishVolume: %v", err)
+	}
+	got := mounter.mountCalls[0]
+	if got.source != staging || !reflect.DeepEqual(got.options, []string{"bind"}) {
+		t.Errorf("Mount(%+v), want bind of staging dir", got)
+	}
+	if fi, err := os.Stat(target); err != nil || !fi.IsDir() {
+		t.Errorf("filesystem target must be a directory (err=%v)", err)
 	}
 }

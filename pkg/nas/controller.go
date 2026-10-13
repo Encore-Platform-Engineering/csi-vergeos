@@ -3,7 +3,10 @@ package nas
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vergeos "github.com/verge-io/govergeos"
@@ -22,6 +25,71 @@ type NASController struct {
 	vmNICs        VMNICClient
 	vms           VMClient
 	machineStatus MachineStatusClient
+
+	// nasServiceMu serializes on-demand NAS service creation so concurrent
+	// CreateVolume calls cannot create duplicate services on the same VM.
+	nasServiceMu sync.Mutex
+}
+
+// nfsExportConfig is the validated NFS access policy derived from StorageClass
+// parameters.
+type nfsExportConfig struct {
+	allowAll     bool
+	allowedHosts string // comma-delimited, only meaningful when !allowAll
+	squash       string
+}
+
+// parseExportConfig validates the access-control StorageClass parameters.
+//
+//   - allowedHosts: comma-separated IPs/CIDRs (typically node subnets) that may
+//     mount the export. Required unless allowAll is "true".
+//   - allowAll: "true" explicitly opts in to a world-accessible export.
+//   - squash: root_squash (default), all_squash, or no_root_squash.
+func parseExportConfig(params map[string]string) (*nfsExportConfig, error) {
+	cfg := &nfsExportConfig{squash: "root_squash"}
+
+	switch v := strings.TrimSpace(params["allowAll"]); v {
+	case "", "false":
+	case "true":
+		cfg.allowAll = true
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid allowAll %q: must be \"true\" or \"false\"", v)
+	}
+
+	if raw := params["allowedHosts"]; strings.TrimSpace(raw) != "" {
+		var hosts []string
+		for _, h := range strings.Split(raw, ",") {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if net.ParseIP(h) == nil {
+				if _, _, err := net.ParseCIDR(h); err != nil {
+					return nil, status.Errorf(codes.InvalidArgument, "invalid allowedHosts entry %q: must be an IP address or CIDR", h)
+				}
+			}
+			hosts = append(hosts, h)
+		}
+		if cfg.allowAll && len(hosts) > 0 {
+			return nil, status.Error(codes.InvalidArgument, "'allowAll: \"true\"' and 'allowedHosts' are mutually exclusive")
+		}
+		cfg.allowedHosts = strings.Join(hosts, ",")
+	}
+
+	if !cfg.allowAll && cfg.allowedHosts == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"StorageClass parameter 'allowedHosts' (comma-separated node IPs/CIDRs) is required; set 'allowAll: \"true\"' to explicitly export to every host")
+	}
+
+	if sq := strings.TrimSpace(params["squash"]); sq != "" {
+		switch sq {
+		case "root_squash", "all_squash", "no_root_squash":
+			cfg.squash = sq
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "invalid squash %q: must be root_squash, all_squash or no_root_squash", sq)
+		}
+	}
+	return cfg, nil
 }
 
 // NewNASController creates a NAS controller backend using a govergeos client.
@@ -44,6 +112,12 @@ func (c *NASController) CreateVolume(ctx context.Context, req *csi.CreateVolumeR
 	nasServiceName := req.Parameters["nasServiceName"]
 	if nasServiceName == "" {
 		return nil, status.Error(codes.InvalidArgument, "StorageClass parameter 'nasServiceName' is required")
+	}
+
+	// Validate the export access policy before touching the VergeOS API.
+	export, err := parseExportConfig(req.Parameters)
+	if err != nil {
+		return nil, err
 	}
 
 	// Parse optional nasServiceVM for on-demand service creation.
@@ -105,17 +179,18 @@ func (c *NASController) CreateVolume(ctx context.Context, req *csi.CreateVolumeR
 	}
 
 	if share == nil {
-		allowAll := true
 		dataAccess := "rw"
-		squash := "no_root_squash"
-
-		share, err = c.nfsShares.Create(ctx, &vergeos.VolumeNFSShareCreateRequest{
+		shareReq := &vergeos.VolumeNFSShareCreateRequest{
 			Name:       shareName,
 			Volume:     vol.ID,
-			AllowAll:   &allowAll,
+			AllowAll:   &export.allowAll,
 			DataAccess: &dataAccess,
-			Squash:     &squash,
-		})
+			Squash:     &export.squash,
+		}
+		if !export.allowAll {
+			shareReq.AllowedHosts = &export.allowedHosts
+		}
+		share, err = c.nfsShares.Create(ctx, shareReq)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "creating NFS share: %v", err)
 		}
@@ -187,27 +262,61 @@ func (c *NASController) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeR
 }
 
 // resolveNASService looks up a NAS service by name. If not found and vmID > 0,
-// it auto-creates the NAS service on the specified VM. This supports on-demand
-// provisioning when the StorageClass includes a "nasServiceVM" parameter.
+// it creates the NAS service on the specified VM (StorageClass "nasServiceVM").
+//
+// The VergeOS API accepts a "name" on POST /vm_services, but govergeos v0.1.9's
+// NASServiceCreateRequest has no Name field, so the service name is derived by
+// VergeOS from the VM name. To stay idempotent and never create duplicates:
+//   - creation is serialized with a mutex and re-checks by name and by VM
+//     before creating;
+//   - the resulting service name must equal the requested name, otherwise the
+//     call fails with FailedPrecondition (name the VM after nasServiceName).
 func (c *NASController) resolveNASService(ctx context.Context, name string, vmID int) (*vergeos.NASService, error) {
 	nasSvc, err := c.nasServices.GetByName(ctx, name)
-	if err != nil {
-		if vergeos.IsNotFoundError(err) {
-			if vmID > 0 {
-				// Auto-create the NAS service on the specified VM.
-				klog.Infof("NAS service %q not found, creating on demand (VM %d)", name, vmID)
-				nasSvc, err = c.nasServices.Create(ctx, &vergeos.NASServiceCreateRequest{
-					VM: vmID,
-				})
-				if err != nil {
-					return nil, status.Errorf(codes.Internal, "auto-creating NAS service %q on VM %d: %v", name, vmID, err)
-				}
-				klog.Infof("Created NAS service %q (id=%d) on VM %d", nasSvc.Name, nasSvc.Key.Int(), vmID)
-				return nasSvc, nil
-			}
-			return nil, status.Errorf(codes.NotFound, "NAS service %q not found; create it in VergeOS or set 'nasServiceVM' in StorageClass parameters", name)
-		}
+	if err == nil {
+		return nasSvc, nil
+	}
+	if !vergeos.IsNotFoundError(err) {
 		return nil, status.Errorf(codes.Internal, "looking up NAS service %q: %v", name, err)
+	}
+	if vmID <= 0 {
+		return nil, status.Errorf(codes.NotFound, "NAS service %q not found; create it in VergeOS or set 'nasServiceVM' in StorageClass parameters", name)
+	}
+
+	c.nasServiceMu.Lock()
+	defer c.nasServiceMu.Unlock()
+
+	// Another CreateVolume may have created the service while we waited.
+	nasSvc, err = c.nasServices.GetByName(ctx, name)
+	if err == nil {
+		return nasSvc, nil
+	}
+	if !vergeos.IsNotFoundError(err) {
+		return nil, status.Errorf(codes.Internal, "looking up NAS service %q: %v", name, err)
+	}
+
+	// A service may already exist on this VM under a different name (e.g. a
+	// previous attempt); never create a second one.
+	existing, err := c.nasServices.GetByVM(ctx, vmID)
+	if err != nil && !vergeos.IsNotFoundError(err) {
+		return nil, status.Errorf(codes.Internal, "looking up NAS service on VM %d: %v", vmID, err)
+	}
+	if existing != nil {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"VM %d already hosts NAS service %q (id=%d), not %q: set StorageClass 'nasServiceName' to %q or rename the VM",
+			vmID, existing.Name, existing.Key.Int(), name, existing.Name)
+	}
+
+	klog.Infof("NAS service %q not found, creating on demand (VM %d)", name, vmID)
+	nasSvc, err = c.nasServices.Create(ctx, &vergeos.NASServiceCreateRequest{VM: vmID})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "auto-creating NAS service %q on VM %d: %v", name, vmID, err)
+	}
+	klog.Infof("Created NAS service %q (id=%d) on VM %d", nasSvc.Name, nasSvc.Key.Int(), vmID)
+	if nasSvc.Name != name {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"created NAS service on VM %d is named %q (derived from the VM name), not the requested %q: set StorageClass 'nasServiceName' to %q or rename the VM",
+			vmID, nasSvc.Name, name, nasSvc.Name)
 	}
 	return nasSvc, nil
 }

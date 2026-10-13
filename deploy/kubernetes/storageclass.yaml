@@ -9,6 +9,14 @@ parameters:
   # IP address of the NAS service (for NFS mounting).
   # If omitted, the driver attempts to look up the IP via the VergeOS API.
   # nasServiceIP: "10.0.0.5"
+  # REQUIRED: comma-separated IPs/CIDRs allowed to mount the NFS exports
+  # (your Kubernetes node subnets). Set 'allowAll: "true"' instead to export to
+  # every host (insecure). Default below is the RFC1918 private ranges.
+  allowedHosts: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  # root_squash (driver default) | all_squash | no_root_squash. Fresh exports are
+  # root-owned and fsGroup does not apply to NFS, so no_root_squash (limited to
+  # allowedHosts) keeps them writable for pods.
+  squash: "no_root_squash"
   # Preferred storage tier (1-5). Default: 1.
   preferredTier: "1"
 reclaimPolicy: Delete

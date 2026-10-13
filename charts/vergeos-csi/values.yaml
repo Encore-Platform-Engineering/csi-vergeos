@@ -25,6 +25,18 @@ nas:
     name: vergeos-nas
     nasServiceName: "k8s-nas"
     # nasServiceIP: ""
+    # NFS export access control (see README "NAS export security").
+    # Comma-separated IPs/CIDRs allowed to mount each PV's export. The driver
+    # refuses to provision unless this is set (or allowAll is true).
+    # Default is the RFC1918 private ranges: narrow it to your node subnets.
+    allowedHosts: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # Explicitly export to every host (insecure). Mutually exclusive with allowedHosts.
+    allowAll: false
+    # root_squash (driver default) | all_squash | no_root_squash.
+    # The chart defaults to no_root_squash so root-owned fresh exports stay
+    # writable for pods (fsGroup does not apply to NFS); access is still
+    # limited to allowedHosts. Set to "" for the driver default (root_squash).
+    squash: "no_root_squash"
     preferredTier: "1"
     reclaimPolicy: Delete
     volumeBindingMode: Immediate
