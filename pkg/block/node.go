@@ -147,6 +147,12 @@ func (n *BlockNode) NodePublishVolume(_ context.Context, req *csi.NodePublishVol
 
 	targetPath := req.TargetPath
 
+	// A read-only bind mount cannot stop writes to a device node, so a
+	// read-only raw block publish would silently be writable.
+	if req.VolumeCapability.GetBlock() != nil && req.Readonly {
+		return nil, status.Error(codes.InvalidArgument, "read-only raw block volumes are not supported")
+	}
+
 	// Idempotency: check if already mounted.
 	mounted, err := n.mounter.IsMounted(targetPath)
 	if err != nil {

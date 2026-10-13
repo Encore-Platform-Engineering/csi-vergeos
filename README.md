@@ -67,7 +67,7 @@ The block driver uses a **pool VM** — a dedicated VergeOS VM that acts as a ho
 4. **NodePublishVolume** — bind-mounts the staging path into the pod.
 5. **ControllerUnpublishVolume** — resolves the node ID the same way, hot-unplugs the drive and moves it back to the pool VM. If the drive is held by a different (live) VM the call is a no-op; if the holder VM no longer exists the drive is moved straight back to the pool. A failed hot-unplug returns a retryable error and the drive is not moved.
 
-Block volumes are ReadWriteOnce, filesystem mode only (`SINGLE_NODE_*`; RWX and raw block are rejected with `InvalidArgument`). Only drives named `csi-*` are published, unpublished or deleted. Publishing a drive that is attached to another node fails with `FailedPrecondition` until it is unpublished there; a retry after a failed hotplug re-hotplugs. `DeleteVolume` refuses attached drives (`FailedPrecondition`). `CreateVolume` is idempotent by name on the pool VM only (no scan of other VMs): same name with an incompatible size returns `AlreadyExists`, `limit_bytes` is honored (`OutOfRange` if `required_bytes` exceeds it), and VergeOS list errors return `Unavailable` rather than risking a duplicate drive.
+Block volumes are ReadWriteOnce, `SINGLE_NODE_*` only; RWX and multi-node modes are rejected with `InvalidArgument`. Both filesystem and raw block (`volumeMode: Block`) are accepted; read-only raw block is rejected (see [Node volume capabilities](#node-volume-capabilities)). Only drives named `csi-*` are published, unpublished or deleted. Publishing a drive that is attached to another node fails with `FailedPrecondition` until it is unpublished there; a retry after a failed hotplug re-hotplugs. `DeleteVolume` refuses attached drives (`FailedPrecondition`). `CreateVolume` is idempotent by name on the pool VM only (no scan of other VMs): same name with an incompatible size returns `AlreadyExists`, `limit_bytes` is honored (`OutOfRange` if `required_bytes` exceeds it), and VergeOS list errors return `Unavailable` rather than risking a duplicate drive.
 
 ## Project Structure
 
@@ -138,6 +138,9 @@ Key Helm values:
 | `vergeos.host` | | VergeOS API URL (include `https://`) |
 | `vergeos.apiKey` | | VergeOS API key |
 | `vergeos.existingSecret` | | Use a pre-created Secret instead |
+| `vergeos.verifySSL` | `"true"` | `"false"` disables TLS verification. Prefer `caBundle`/`caSecret` for a private CA |
+| `vergeos.caBundle` | | Inline PEM of the private VergeOS root CA. Mutually exclusive with `caSecret` |
+| `vergeos.caSecret` / `vergeos.caSecretKey` | | Existing Secret (same namespace) and key (default `ca.crt`) holding the CA PEM |
 | `nas.enabled` | `true` | Deploy the NAS driver |
 | `block.enabled` | `true` | Deploy the Block driver |
 | `block.poolVmId` | | **Required** when block is enabled. VergeOS VM ID to hold idle block drives |
@@ -172,9 +175,17 @@ Default decision: the driver is fail-closed with `root_squash`. The Helm chart a
 
 `nasServiceVM` creates a NAS service on that VM if `nasServiceName` does not exist. The VergeOS API accepts a service `name`, but the bundled govergeos client cannot set it, so VergeOS derives it from the VM name. Name the VM exactly `nasServiceName`; otherwise `CreateVolume` fails with `FailedPrecondition` (and never creates a second service on that VM). Pre-creating the NAS service is recommended.
 
+### Private VergeOS CA
+
+Set one of `vergeos.caBundle` (inline PEM) or `vergeos.caSecret` (+ `caSecretKey`), and keep `vergeos.verifySSL: "true"`. The chart mounts the CA at `/etc/vergeos/ca.crt` in both controller Deployments and sets `SSL_CERT_FILE` (Go replaces its default trust roots with that file, so it must contain the CA that signs the VergeOS cert). A changed `caBundle` rolls the pods; a changed `caSecret` Secret does not, so run `kubectl rollout restart` after editing it. Only the controllers talk to VergeOS; the node plugin needs no CA.
+
+```bash
+helm upgrade --install csi charts/vergeos-csi ... --set-file vergeos.caBundle=vergeos-root.pem
+```
+
 ### Node volume capabilities
 
-Block volumes support `fsType` `ext4` (default) and `xfs`; other types are rejected with `InvalidArgument`. StorageClass `mountOptions` are passed to the filesystem mount. `volumeMode: Block` is supported on the block driver (device bind-mounted into the pod, never formatted) and rejected by the NAS driver.
+Block volumes support `fsType` `ext4` (default) and `xfs`; other types are rejected with `InvalidArgument`. StorageClass `mountOptions` are passed to the filesystem mount. `volumeMode: Block` is supported on the block driver with `ReadWriteOnce` (the device node is bind-mounted into the pod, never formatted) and rejected by the NAS driver. Read-only raw block (`SINGLE_NODE_READER_ONLY`, `readOnly: true`) is rejected: a read-only bind mount does not stop writes to a device node.
 
 ### Raw manifests
 

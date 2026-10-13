@@ -391,7 +391,7 @@ func TestNodeStageVolume_RawBlockNotFormatted(t *testing.T) {
 	}
 }
 
-func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
+func TestNodePublishVolume_RawBlockReadonlyRejected(t *testing.T) {
 	node, mounter, _ := newTestBlockNode()
 	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
 	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
@@ -402,6 +402,27 @@ func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
 		VolumeCapability:  rawBlockCap(),
 		Readonly:          true,
 	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("err = %v, want InvalidArgument", err)
+	}
+	if len(mounter.mountCalls) != 0 {
+		t.Errorf("Mount called for read-only raw block: %v", mounter.mountCalls)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target file created despite rejection (err=%v)", err)
+	}
+}
+
+func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
+	node, mounter, _ := newTestBlockNode()
+	target := filepath.Join(t.TempDir(), "publish", "pvc-123")
+	_, err := node.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:          "100",
+		TargetPath:        target,
+		StagingTargetPath: filepath.Join(t.TempDir(), "staging"),
+		PublishContext:    map[string]string{"serial": "csi-abc123"},
+		VolumeCapability:  rawBlockCap(),
+	})
 	if err != nil {
 		t.Fatalf("NodePublishVolume: %v", err)
 	}
@@ -409,8 +430,8 @@ func TestNodePublishVolume_RawBlockBindMountsDevice(t *testing.T) {
 		t.Fatalf("Mount calls = %d, want 1", len(mounter.mountCalls))
 	}
 	got := mounter.mountCalls[0]
-	if got.source != "/dev/sdb" || got.target != target || !reflect.DeepEqual(got.options, []string{"bind", "ro"}) {
-		t.Errorf("Mount(%+v), want device /dev/sdb bind,ro onto %s", got, target)
+	if got.source != "/dev/sdb" || got.target != target || !reflect.DeepEqual(got.options, []string{"bind"}) {
+		t.Errorf("Mount(%+v), want device /dev/sdb bind onto %s", got, target)
 	}
 	fi, err := os.Stat(target)
 	if err != nil || !fi.Mode().IsRegular() {

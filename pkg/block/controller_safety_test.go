@@ -164,6 +164,13 @@ func rwo() *csi.VolumeCapability {
 	}
 }
 
+func rawCap(mode csi.VolumeCapability_AccessMode_Mode) *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: mode},
+	}
+}
+
 func capMode(mode csi.VolumeCapability_AccessMode_Mode) *csi.VolumeCapability {
 	return &csi.VolumeCapability{AccessMode: &csi.VolumeCapability_AccessMode{Mode: mode}}
 }
@@ -210,10 +217,9 @@ func TestPublish_RejectsUnsupportedCapabilities(t *testing.T) {
 		"single-writer-multi-node": capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER),
 		"unknown":                  capMode(csi.VolumeCapability_AccessMode_UNKNOWN),
 		"no mode":                  {},
-		"raw block": {
-			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
-			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
-		},
+		"raw block RWX":            rawCap(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER),
+		"raw block ROX":            rawCap(csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY),
+		"raw block read-only":      rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY),
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, fd, _ := safetyController()
@@ -423,16 +429,15 @@ func createReq(name string, required, limit int64, caps ...*csi.VolumeCapability
 
 func TestCreate_RejectsUnsupportedCapabilities(t *testing.T) {
 	for name, caps := range map[string][]*csi.VolumeCapability{
-		"RWX":     {capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
-		"ROX":     {capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY)},
-		"mixed":   {rwo(), capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
-		"nil cap": {nil},
-		"no caps": nil,
-		"no mode": {{}},
-		"raw block": {{
-			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
-			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
-		}},
+		"RWX":                 {capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
+		"ROX":                 {capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY)},
+		"mixed":               {rwo(), capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
+		"nil cap":             {nil},
+		"no caps":             nil,
+		"no mode":             {{}},
+		"raw block RWX":       {rawCap(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
+		"raw block read-only": {rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY)},
+		"mixed raw RWX":       {rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER), rawCap(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, fd, _ := safetyController()
@@ -654,12 +659,9 @@ func TestKeyedLock_SerializesPerKeyAndCleansUp(t *testing.T) {
 func TestValidateVolumeCapabilities_NilAccessModeAndBlock(t *testing.T) {
 	c, _, _ := safetyController()
 	for name, vc := range map[string]*csi.VolumeCapability{
-		"no access mode": {},
-		"raw block": {
-			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
-			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
-		},
-		"RWX": capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER),
+		"no access mode":      {},
+		"raw block read-only": rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY),
+		"RWX":                 capMode(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER),
 	} {
 		resp, err := c.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
 			VolumeId: "1", VolumeCapabilities: []*csi.VolumeCapability{vc},
@@ -803,4 +805,53 @@ type createFailing struct{ *fakeDrives }
 
 func (c *createFailing) Create(context.Context, int, *vergeos.VMDriveCreateRequest) (*vergeos.VMDrive, error) {
 	return nil, errors.New("api down")
+}
+
+// --- raw block (volumeMode: Block) is accepted by the controller (#23) ---
+
+func TestCreate_AcceptsRawBlock(t *testing.T) {
+	for _, m := range []csi.VolumeCapability_AccessMode_Mode{
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+	} {
+		c, fd, _ := safetyController()
+		if _, err := c.CreateVolume(context.Background(), createReq("pvc", 0, 0, rawCap(m))); err != nil {
+			t.Errorf("raw block %s rejected: %v", m, err)
+		}
+		if fd.creates != 1 {
+			t.Errorf("raw block %s: creates = %d, want 1", m, fd.creates)
+		}
+	}
+	// Filesystem and raw block caps may be mixed in one request.
+	c, _, _ := safetyController()
+	if _, err := c.CreateVolume(context.Background(), createReq("pvc2", 0, 0, rwo(), rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER))); err != nil {
+		t.Errorf("mixed fs+raw rejected: %v", err)
+	}
+}
+
+func TestPublish_AcceptsRawBlock(t *testing.T) {
+	c, fd, _ := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: poolMachine})
+	_, err := c.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
+		VolumeId: "100", NodeId: "name:node-a",
+		VolumeCapability: rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER),
+	})
+	if err != nil {
+		t.Fatalf("raw block publish rejected: %v", err)
+	}
+	if got := fd.get(100); got.Machine != nodeAMach {
+		t.Errorf("drive machine = %d, want %d", got.Machine, nodeAMach)
+	}
+}
+
+func TestValidateVolumeCapabilities_ConfirmsRawBlock(t *testing.T) {
+	c, _, _ := safetyController()
+	resp, err := c.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId:           "1",
+		VolumeCapabilities: []*csi.VolumeCapability{rawCap(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER)},
+	})
+	if err != nil || resp.Confirmed == nil {
+		t.Errorf("raw block RWO not confirmed: %v %v", resp, err)
+	}
 }

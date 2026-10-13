@@ -1,0 +1,12 @@
+{{- if eq (include "vergeos-csi.caEnabled" .) "true" }}
+{{- if .Values.vergeos.caBundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vergeos-csi.caConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+data:
+  ca.crt: |
+    {{- .Values.vergeos.caBundle | nindent 4 }}
+{{- end }}
+{{- end }}

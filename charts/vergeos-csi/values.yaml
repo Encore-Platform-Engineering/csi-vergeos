@@ -16,6 +16,13 @@ vergeos:
   apiKey: ""
   verifySSL: "true"
   existingSecret: ""
+  # Trust a private VergeOS root CA (use with verifySSL "true"). Set at most one.
+  # Mounted at /etc/vergeos/ca.crt in both controllers with SSL_CERT_FILE set;
+  # it replaces the container's default trust roots. Changing caBundle rolls the pods.
+  # caBundle: inline PEM. caSecret: existing Secret (same namespace) + key.
+  caBundle: ""
+  caSecret: ""
+  caSecretKey: ca.crt
 
 # NAS driver settings
 nas:

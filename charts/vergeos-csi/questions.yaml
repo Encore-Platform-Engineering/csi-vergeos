@@ -23,6 +23,25 @@ questions:
       - "false"
     group: "VergeOS Connection"
 
+  - variable: vergeos.caBundle
+    label: CA Bundle (PEM)
+    description: "Private VergeOS root CA, inline PEM. Use with Verify SSL = true. Mutually exclusive with CA Secret"
+    type: multiline
+    group: "VergeOS Connection"
+
+  - variable: vergeos.caSecret
+    label: CA Secret
+    description: "Existing Secret (same namespace) holding the private CA PEM. Mutually exclusive with CA Bundle"
+    type: string
+    group: "VergeOS Connection"
+
+  - variable: vergeos.caSecretKey
+    label: CA Secret Key
+    description: "Key in the CA Secret that holds the PEM"
+    type: string
+    default: "ca.crt"
+    group: "VergeOS Connection"
+
   - variable: vergeos.existingSecret
     label: Existing Secret
     description: "Name of an existing Secret with VergeOS credentials (overrides above fields)"
