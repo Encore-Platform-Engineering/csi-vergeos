@@ -373,51 +373,6 @@ func TestBlockControllerPublishVolume_VMNotFound(t *testing.T) {
 	}
 }
 
-func TestBlockCreateVolume_IdempotentAfterPublish(t *testing.T) {
-	c, driveMock := newTestBlockController()
-
-	// Drive was created on pool VM (machineID=10), then moved to node VM (machineID=500) via publish.
-	// Pool VM list returns empty.
-	driveMock.listFn = func(_ context.Context, machineID int) ([]vergeos.VMDrive, error) {
-		if machineID == 10 { // pool VM machine ID
-			return nil, nil
-		}
-		if machineID == 500 { // node VM machine ID
-			return []vergeos.VMDrive{
-				{ID: 100, Name: "csi-test-pvc", Serial: "csi-abc123", SizeBytes: 10737418240, Machine: 500},
-			}, nil
-		}
-		return nil, nil
-	}
-
-	// If CreateVolume incorrectly creates a new drive, it will get ID 200.
-	// We expect the idempotent path to return the existing drive (ID 100).
-	driveMock.createFn = func(_ context.Context, _ int, req *vergeos.VMDriveCreateRequest) (*vergeos.VMDrive, error) {
-		return &vergeos.VMDrive{
-			ID:        200,
-			Name:      req.Name,
-			Serial:    req.Serial,
-			SizeBytes: req.SizeBytes,
-		}, nil
-	}
-
-	req := &csi.CreateVolumeRequest{
-		Name:          "test-pvc",
-		CapacityRange: &csi.CapacityRange{RequiredBytes: 10737418240},
-		VolumeCapabilities: []*csi.VolumeCapability{
-			{AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER}},
-		},
-	}
-
-	resp, err := c.CreateVolume(context.Background(), req)
-	if err != nil {
-		t.Fatalf("CreateVolume (idempotent after publish) failed: %v", err)
-	}
-	if resp.Volume.VolumeId != "100" {
-		t.Errorf("VolumeId = %q, want %q (should reuse existing drive, not create new)", resp.Volume.VolumeId, "100")
-	}
-}
-
 func TestBlockDeleteVolume_APIError(t *testing.T) {
 	c, driveMock := newTestBlockController()
 	driveMock.deleteFn = func(_ context.Context, _ int) error {
@@ -518,8 +473,8 @@ func TestBlockControllerPublishVolume_HotplugError(t *testing.T) {
 
 	_, err := c.ControllerPublishVolume(context.Background(), req)
 	st, _ := status.FromError(err)
-	if st.Code() != codes.Internal {
-		t.Errorf("expected Internal error on hotplug failure, got %v", err)
+	if st.Code() != codes.Unavailable {
+		t.Errorf("expected Unavailable error on hotplug failure, got %v", err)
 	}
 }
 
