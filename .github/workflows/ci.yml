@@ -28,6 +28,11 @@ jobs:
         run: |
           helm template x charts/vergeos-csi --set block.poolVmId=1 --set kubeletDir=/var/lib/k0s/kubelet > /tmp/k0s.yaml
           ! grep -q '/var/lib/kubelet' /tmp/k0s.yaml
+      - name: Chart/manifest assertions (mounts, RBAC, probes, image refs)
+        env:
+          # On a v* tag the chart image must be exactly the tag the image job pushes.
+          IMAGE_REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: hack/check-chart.sh
 
   image:
     needs: test

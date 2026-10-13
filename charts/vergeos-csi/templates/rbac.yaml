@@ -1,13 +1,14 @@
+# Controller: provisioner (+ attacher for block) in the controller Deployments.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "vergeos-csi.name" . }}
+  name: {{ include "vergeos-csi.controllerName" . }}
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "vergeos-csi.name" . }}
+  name: {{ include "vergeos-csi.controllerName" . }}
 rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
@@ -22,30 +23,84 @@ rules:
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments/status"]
-    verbs: ["patch"]
-  - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.block.enabled }}
+  # Attacher (block only; NAS has attachRequired=false)
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vergeos-csi.controllerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vergeos-csi.controllerName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "vergeos-csi.controllerName" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+# Leader election leases live in the release namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "vergeos-csi.controllerName" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ include "vergeos-csi.name" . }}
+  name: {{ include "vergeos-csi.controllerName" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "vergeos-csi.name" . }}
+    name: {{ include "vergeos-csi.controllerName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "vergeos-csi.controllerName" . }}-leader-election
+  apiGroup: rbac.authorization.k8s.io
+---
+# Node plugin: only reads its own Node (spec.providerID) to derive the node ID.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "vergeos-csi.nodeName" . }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vergeos-csi.nodeName" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vergeos-csi.nodeName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vergeos-csi.nodeName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "vergeos-csi.name" . }}
+  name: {{ include "vergeos-csi.nodeName" . }}
   apiGroup: rbac.authorization.k8s.io

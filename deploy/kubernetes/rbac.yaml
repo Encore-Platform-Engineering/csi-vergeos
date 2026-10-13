@@ -1,13 +1,14 @@
+# Controller: provisioner + attacher sidecars.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: csi-vergeos
+  name: csi-vergeos-controller
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: csi-vergeos
+  name: csi-vergeos-controller
 rules:
   # Provisioner needs these
   - apiGroups: [""]
@@ -22,7 +23,7 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
-  # Attacher needs these
+  # Attacher needs these (block only)
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments"]
     verbs: ["get", "list", "watch", "update", "patch"]
@@ -36,20 +37,70 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
-  # Provisioner leader election
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: csi-vergeos-controller
+subjects:
+  - kind: ServiceAccount
+    name: csi-vergeos-controller
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: csi-vergeos-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+# Leader election leases live in kube-system only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: csi-vergeos-controller-leader-election
+  namespace: kube-system
+rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: csi-vergeos
+  name: csi-vergeos-controller-leader-election
+  namespace: kube-system
 subjects:
   - kind: ServiceAccount
-    name: csi-vergeos
+    name: csi-vergeos-controller
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: csi-vergeos-controller-leader-election
+  apiGroup: rbac.authorization.k8s.io
+---
+# Node plugin: only reads its own Node (spec.providerID) to derive the node ID.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-vergeos-node
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: csi-vergeos-node
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: csi-vergeos-node
+subjects:
+  - kind: ServiceAccount
+    name: csi-vergeos-node
     namespace: kube-system
 roleRef:
   kind: ClusterRole
-  name: csi-vergeos
+  name: csi-vergeos-node
   apiGroup: rbac.authorization.k8s.io

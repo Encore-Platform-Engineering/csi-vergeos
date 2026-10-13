@@ -14,8 +14,15 @@ spec:
       labels:
         app: {{ include "vergeos-csi.name" . }}-node
     spec:
-      serviceAccountName: {{ include "vergeos-csi.name" . }}
+      serviceAccountName: {{ include "vergeos-csi.nodeName" . }}
       hostNetwork: false
+      {{- with .Values.node.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -37,9 +44,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          envFrom:
-            - secretRef:
-                name: {{ include "vergeos-csi.secretName" . }}
+          ports:
+            - name: healthz-nas
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz-nas
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           securityContext:
             privileged: true
           volumeMounts:
@@ -71,9 +87,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          envFrom:
-            - secretRef:
-                name: {{ include "vergeos-csi.secretName" . }}
+          ports:
+            - name: healthz-block
+              containerPort: 9809
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz-block
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           securityContext:
             privileged: true
           volumeMounts:
@@ -81,6 +106,10 @@ spec:
               mountPath: /csi-block
             - name: pods-mount-dir
               mountPath: {{ .Values.kubeletDir }}/pods
+              mountPropagation: Bidirectional
+            # NodeStageVolume mounts under here; must propagate to the host.
+            - name: csi-staging-dir
+              mountPath: {{ .Values.kubeletDir }}/plugins/kubernetes.io/csi
               mountPropagation: Bidirectional
             - name: device-dir
               mountPath: /dev
@@ -188,6 +217,10 @@ spec:
             path: {{ .Values.kubeletDir }}/pods
             type: Directory
         {{- if .Values.block.enabled }}
+        - name: csi-staging-dir
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
         - name: device-dir
           hostPath:
             path: /dev
