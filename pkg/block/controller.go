@@ -3,6 +3,8 @@ package block
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vergeos "github.com/verge-io/govergeos"
@@ -150,19 +152,46 @@ type nodeVMInfo struct {
 	machineID int // Internal machine reference — used for drive assignment
 }
 
-// resolveNodeVM looks up the VergeOS VM for a Kubernetes node by matching
-// the node name against VM names in the VergeOS API.
+// resolveNodeVM looks up the VergeOS VM for a CSI node ID. The ID is
+// `uuid:<vm uuid>`, `key:<vm $key>`, `name:<vm name>` or a bare VM name
+// (legacy). Snapshot VMs are excluded and more than one match is an error.
 func (c *BlockController) resolveNodeVM(ctx context.Context, nodeID string) (*nodeVMInfo, error) {
-	vms, err := c.vms.List(ctx, vergeos.WithFilter(fmt.Sprintf("name eq '%s'", nodeID)))
+	kind, value, err := driver.ParseNodeID(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	var filter string
+	var match func(vm vergeos.VM) bool
+	switch kind {
+	case driver.NodeIDKindUUID:
+		filter = fmt.Sprintf("uuid eq '%s' and is_snapshot eq false", value)
+		match = func(vm vergeos.VM) bool { return strings.EqualFold(vm.UUID, value) }
+	case driver.NodeIDKindKey:
+		filter = fmt.Sprintf("$key eq %s and is_snapshot eq false", value)
+		match = func(vm vergeos.VM) bool { return strconv.Itoa(vm.ID.Int()) == value }
+	default:
+		filter = fmt.Sprintf("name eq '%s' and is_snapshot eq false", value)
+		match = func(vm vergeos.VM) bool { return vm.Name == value }
+	}
+
+	vms, err := c.vms.List(ctx, vergeos.WithFilter(filter))
 	if err != nil {
 		return nil, fmt.Errorf("listing VMs to find node %q: %w", nodeID, err)
 	}
+	var found []vergeos.VM
 	for _, vm := range vms {
-		if vm.Name == nodeID {
-			return &nodeVMInfo{vmID: vm.ID.Int(), machineID: vm.Machine}, nil
+		if !vm.IsSnapshot && match(vm) {
+			found = append(found, vm)
 		}
 	}
-	return nil, fmt.Errorf("no VergeOS VM found matching node %q", nodeID)
+	switch len(found) {
+	case 0:
+		return nil, fmt.Errorf("no VergeOS VM found matching node %q", nodeID)
+	case 1:
+		return &nodeVMInfo{vmID: found[0].ID.Int(), machineID: found[0].Machine}, nil
+	default:
+		return nil, fmt.Errorf("%d VergeOS VMs match node %q; refusing to guess", len(found), nodeID)
+	}
 }
 
 func (c *BlockController) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
@@ -255,10 +284,10 @@ func (c *BlockController) ControllerUnpublishVolume(ctx context.Context, req *cs
 	if drive.PowerState == "online" {
 		if req.NodeId != "" {
 			nodeVM, err := c.resolveNodeVM(ctx, req.NodeId)
-			if err == nil {
-				if err := c.vmDrives.HotUnplugDrive(ctx, nodeVM.vmID, driveID); err != nil {
-					klog.Warningf("Hot-unplug drive %d from VM %d failed: %v (will still move)", driveID, nodeVM.vmID, err)
-				}
+			if err != nil {
+				klog.Warningf("Resolving node %q for hot-unplug of drive %d failed: %v (will still move)", req.NodeId, driveID, err)
+			} else if err := c.vmDrives.HotUnplugDrive(ctx, nodeVM.vmID, driveID); err != nil {
+				klog.Warningf("Hot-unplug drive %d from VM %d failed: %v (will still move)", driveID, nodeVM.vmID, err)
 			}
 		}
 	}

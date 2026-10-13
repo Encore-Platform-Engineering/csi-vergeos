@@ -19,6 +19,10 @@ type Config struct {
 	NodeID            string
 	ControllerBackend ControllerBackend
 	NodeBackend       NodeBackend
+	// NodeIDResolver derives the CSI node ID in node mode. When nil, the
+	// in-cluster Kubernetes API is used if available, otherwise NodeID is
+	// reported as is.
+	NodeIDResolver NodeIDResolver
 }
 
 // Driver is the top-level CSI driver. It owns the gRPC server and all services.
@@ -51,6 +55,18 @@ func New(cfg Config) (*Driver, error) {
 	// Register Node service in node mode.
 	if cfg.Mode == NodeMode {
 		node := NewNodeService(cfg.NodeID, cfg.NodeBackend)
+		// Only the block driver maps node IDs to VMs; NAS keeps the plain name.
+		resolver := cfg.NodeIDResolver
+		if resolver == nil && cfg.DriverType == BlockDriver {
+			if r, ok := NewInClusterNodeIDResolver(cfg.NodeID); ok {
+				resolver = r
+			} else {
+				klog.Warning("Not running in a cluster; node ID is not derived from providerID")
+			}
+		}
+		if resolver != nil {
+			node.WithNodeIDResolver(resolver)
+		}
 		csi.RegisterNodeServer(d.grpcServer, node)
 		klog.Infof("Registered Node service (driver=%s, node=%s)", driverName, cfg.NodeID)
 	}
