@@ -1,6 +1,6 @@
 # Build artifacts
 bin/
-csi-vergeos
+/csi-vergeos
 
 # IDE and tool config
 .claude/

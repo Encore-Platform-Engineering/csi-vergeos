@@ -46,7 +46,7 @@ spec:
             - name: nas-socket-dir
               mountPath: /csi-nas
             - name: pods-mount-dir
-              mountPath: /var/lib/kubelet/pods
+              mountPath: {{ .Values.kubeletDir }}/pods
               mountPropagation: Bidirectional
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
@@ -77,7 +77,7 @@ spec:
             - name: block-socket-dir
               mountPath: /csi-block
             - name: pods-mount-dir
-              mountPath: /var/lib/kubelet/pods
+              mountPath: {{ .Values.kubeletDir }}/pods
               mountPropagation: Bidirectional
             - name: device-dir
               mountPath: /dev
@@ -91,7 +91,7 @@ spec:
           image: {{ .Values.sidecars.registrar.image }}
           args:
             - "--csi-address=/csi-nas/csi.sock"
-            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi-nas.verge.io/csi.sock"
+            - "--kubelet-registration-path={{ .Values.kubeletDir }}/plugins/csi-nas.verge.io/csi.sock"
             - "--v={{ .Values.logLevel }}"
           volumeMounts:
             - name: nas-socket-dir
@@ -112,7 +112,7 @@ spec:
           image: {{ .Values.sidecars.registrar.image }}
           args:
             - "--csi-address=/csi-block/csi.sock"
-            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi-block.verge.io/csi.sock"
+            - "--kubelet-registration-path={{ .Values.kubeletDir }}/plugins/csi-block.verge.io/csi.sock"
             - "--v={{ .Values.logLevel }}"
           volumeMounts:
             - name: block-socket-dir
@@ -167,22 +167,22 @@ spec:
         {{- if .Values.nas.enabled }}
         - name: nas-socket-dir
           hostPath:
-            path: /var/lib/kubelet/plugins/csi-nas.verge.io/
+            path: {{ .Values.kubeletDir }}/plugins/csi-nas.verge.io/
             type: DirectoryOrCreate
         {{- end }}
         {{- if .Values.block.enabled }}
         - name: block-socket-dir
           hostPath:
-            path: /var/lib/kubelet/plugins/csi-block.verge.io/
+            path: {{ .Values.kubeletDir }}/plugins/csi-block.verge.io/
             type: DirectoryOrCreate
         {{- end }}
         - name: registration-dir
           hostPath:
-            path: /var/lib/kubelet/plugins_registry/
+            path: {{ .Values.kubeletDir }}/plugins_registry/
             type: DirectoryOrCreate
         - name: pods-mount-dir
           hostPath:
-            path: /var/lib/kubelet/pods
+            path: {{ .Values.kubeletDir }}/pods
             type: Directory
         {{- if .Values.block.enabled }}
         - name: device-dir

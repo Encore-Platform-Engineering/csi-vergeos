@@ -1,3 +1,4 @@
+# NOTE: default kubelet dir only (/var/lib/kubelet). For k0s use the Helm chart with --set kubeletDir=/var/lib/k0s/kubelet.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

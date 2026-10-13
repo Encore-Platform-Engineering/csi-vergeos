@@ -3,6 +3,9 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
+# Kubelet root dir on the nodes. k0s: /var/lib/k0s/kubelet
+kubeletDir: /var/lib/kubelet
+
 imagePullSecrets: []
 # - name: ghcr-credentials
 
