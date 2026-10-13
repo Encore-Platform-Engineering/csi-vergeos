@@ -2,6 +2,9 @@ package block
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -10,6 +13,10 @@ import (
 
 	"github.com/verge-io/csi-vergeos/pkg/util"
 )
+
+// supportedFsTypes is the allowlist of filesystems the node image can format.
+// ext4 comes from e2fsprogs, xfs from xfsprogs (see Dockerfile).
+var supportedFsTypes = map[string]bool{"ext4": true, "xfs": true}
 
 // BlockNode implements driver.NodeBackend for block volumes.
 type BlockNode struct {
@@ -25,6 +32,22 @@ func NewBlockNode() *BlockNode {
 	}
 }
 
+// mountSettings extracts the filesystem type (default ext4) and mount flags
+// from a filesystem-mode capability, rejecting unsupported filesystems.
+func mountSettings(volCap *csi.VolumeCapability) (fsType string, flags []string, err error) {
+	fsType = "ext4"
+	if m := volCap.GetMount(); m != nil {
+		if m.FsType != "" {
+			fsType = m.FsType
+		}
+		flags = m.MountFlags
+	}
+	if !supportedFsTypes[fsType] {
+		return "", nil, status.Errorf(codes.InvalidArgument, "unsupported fsType %q: supported types are ext4 and xfs", fsType)
+	}
+	return fsType, flags, nil
+}
+
 func (n *BlockNode) NodeStageVolume(_ context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	if req.VolumeId == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
@@ -34,6 +57,18 @@ func (n *BlockNode) NodeStageVolume(_ context.Context, req *csi.NodeStageVolumeR
 	}
 
 	stagingPath := req.StagingTargetPath
+
+	// Raw block volumes are handed to the pod as a device at publish time;
+	// nothing is formatted or mounted at staging.
+	if req.VolumeCapability.GetBlock() != nil {
+		klog.Infof("Staging raw block volume %s: nothing to format or mount", req.VolumeId)
+		return &csi.NodeStageVolumeResponse{}, nil
+	}
+
+	fsType, mountFlags, err := mountSettings(req.VolumeCapability)
+	if err != nil {
+		return nil, err
+	}
 
 	// Idempotency: check if already staged.
 	mounted, err := n.mounter.IsMounted(stagingPath)
@@ -57,12 +92,6 @@ func (n *BlockNode) NodeStageVolume(_ context.Context, req *csi.NodeStageVolumeR
 		return nil, status.Errorf(codes.NotFound, "block device with serial %q not found: %v", serial, err)
 	}
 
-	// Determine filesystem type (default ext4).
-	fsType := "ext4"
-	if mountCap := req.VolumeCapability.GetMount(); mountCap != nil && mountCap.FsType != "" {
-		fsType = mountCap.FsType
-	}
-
 	// Create staging directory.
 	if err := util.EnsureDirectory(stagingPath); err != nil {
 		return nil, status.Errorf(codes.Internal, "creating staging directory: %v", err)
@@ -70,7 +99,7 @@ func (n *BlockNode) NodeStageVolume(_ context.Context, req *csi.NodeStageVolumeR
 
 	// Format (if needed) and mount the device to the staging path.
 	klog.Infof("Staging volume %s: device=%s, fs=%s, target=%s", req.VolumeId, devicePath, fsType, stagingPath)
-	if err := n.mounter.FormatAndMount(devicePath, stagingPath, fsType, nil); err != nil {
+	if err := n.mounter.FormatAndMount(devicePath, stagingPath, fsType, mountFlags); err != nil {
 		return nil, status.Errorf(codes.Internal, "format and mount failed: %v", err)
 	}
 
@@ -128,23 +157,61 @@ func (n *BlockNode) NodePublishVolume(_ context.Context, req *csi.NodePublishVol
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 
-	// Create target directory.
-	if err := util.EnsureDirectory(targetPath); err != nil {
-		return nil, status.Errorf(codes.Internal, "creating target directory: %v", err)
-	}
-
-	// Bind-mount from staging to target.
+	// Bind-mount from staging to target (filesystem mode) or the device node
+	// itself onto a target file (raw block mode).
 	options := []string{"bind"}
 	if req.Readonly {
 		options = append(options, "ro")
 	}
 
-	klog.Infof("Publishing volume %s: bind mount %s -> %s", req.VolumeId, req.StagingTargetPath, targetPath)
-	if err := n.mounter.Mount(req.StagingTargetPath, targetPath, "", options); err != nil {
+	source := req.StagingTargetPath
+	if req.VolumeCapability.GetBlock() != nil {
+		serial := req.PublishContext["serial"]
+		if serial == "" {
+			return nil, status.Error(codes.InvalidArgument, "publish context missing 'serial'")
+		}
+		devicePath, err := n.discovery.FindBySerial(serial)
+		if err != nil {
+			return nil, status.Errorf(codes.NotFound, "block device with serial %q not found: %v", serial, err)
+		}
+		source = devicePath
+		if err := ensureFile(targetPath); err != nil {
+			return nil, status.Errorf(codes.Internal, "creating target file: %v", err)
+		}
+	} else {
+		// The staged filesystem must be a real mount visible to the kubelet;
+		// otherwise the pod would bind an empty directory.
+		staged, err := n.mounter.IsMounted(req.StagingTargetPath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "checking staging mount status: %v", err)
+		}
+		if !staged {
+			return nil, status.Errorf(codes.FailedPrecondition, "staging path %q is not a mount point: volume is not staged", req.StagingTargetPath)
+		}
+		if err := util.EnsureDirectory(targetPath); err != nil {
+			return nil, status.Errorf(codes.Internal, "creating target directory: %v", err)
+		}
+	}
+
+	klog.Infof("Publishing volume %s: bind mount %s -> %s", req.VolumeId, source, targetPath)
+	if err := n.mounter.Mount(source, targetPath, "", options); err != nil {
 		return nil, status.Errorf(codes.Internal, "bind mount failed: %v", err)
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+// ensureFile creates an empty regular file (and parent directories) to serve
+// as the bind-mount target for a raw block device.
+func ensureFile(path string) error {
+	if err := util.EnsureDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o640)
+	if err != nil {
+		return fmt.Errorf("creating %q: %w", path, err)
+	}
+	return f.Close()
 }
 
 func (n *BlockNode) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {

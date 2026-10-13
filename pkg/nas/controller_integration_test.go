@@ -76,6 +76,7 @@ func TestIntegration_CreateAndDeleteVolume(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": testNASServiceName,
+			"allowedHosts":   "10.0.0.0/8",
 			"nasServiceIP":   testNASServiceIP,
 		},
 	}
@@ -149,6 +150,7 @@ func TestIntegration_CreateVolume_Idempotent(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": testNASServiceName,
+			"allowedHosts":   "10.0.0.0/8",
 			"nasServiceIP":   testNASServiceIP,
 		},
 	}

@@ -3,7 +3,9 @@ package nas
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vergeos "github.com/verge-io/govergeos"
@@ -15,6 +17,7 @@ import (
 
 type mockNASServiceClient struct {
 	getByNameFn func(ctx context.Context, name string) (*vergeos.NASService, error)
+	getByVMFn   func(ctx context.Context, vmID int) (*vergeos.NASService, error)
 	createFn    func(ctx context.Context, req *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error)
 }
 
@@ -26,6 +29,12 @@ func (m *mockNASServiceClient) GetByName(ctx context.Context, name string) (*ver
 		return m.getByNameFn(ctx, name)
 	}
 	return nil, &vergeos.NotFoundError{Resource: "NASService", ID: name}
+}
+func (m *mockNASServiceClient) GetByVM(ctx context.Context, vmID int) (*vergeos.NASService, error) {
+	if m.getByVMFn != nil {
+		return m.getByVMFn(ctx, vmID)
+	}
+	return nil, &vergeos.NotFoundError{Resource: "NASService", ID: vmID}
 }
 func (m *mockNASServiceClient) Create(ctx context.Context, req *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error) {
 	if m.createFn != nil {
@@ -198,6 +207,7 @@ func TestCreateVolume_Success(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": "k8s-nas",
+			"allowedHosts":   "10.0.0.0/24",
 		},
 	}
 
@@ -237,6 +247,7 @@ func TestCreateVolume_StaticIP(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": "k8s-nas",
+			"allowedHosts":   "10.0.0.0/24",
 			"nasServiceIP":   "192.168.1.100",
 		},
 	}
@@ -271,7 +282,7 @@ func TestCreateVolume_Idempotent(t *testing.T) {
 		VolumeCapabilities: []*csi.VolumeCapability{
 			{AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER}},
 		},
-		Parameters: map[string]string{"nasServiceName": "k8s-nas"},
+		Parameters: map[string]string{"nasServiceName": "k8s-nas", "allowedHosts": "10.0.0.0/24"},
 	}
 
 	resp, err := c.CreateVolume(context.Background(), req)
@@ -422,6 +433,7 @@ func TestNASCreateVolume_AutoCreateService(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": "new-nas",
+			"allowedHosts":   "10.0.0.0/24",
 			"nasServiceVM":   "200",
 		},
 	}
@@ -469,6 +481,7 @@ func TestNASCreateVolume_AutoCreateService_NoVM(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": "missing-nas",
+			"allowedHosts":   "10.0.0.0/24",
 			// No nasServiceVM — should fail with helpful error
 		},
 	}
@@ -517,6 +530,7 @@ func TestNASCreateVolume_AutoCreateService_CreateFails(t *testing.T) {
 		},
 		Parameters: map[string]string{
 			"nasServiceName": "new-nas",
+			"allowedHosts":   "10.0.0.0/24",
 			"nasServiceVM":   "200",
 		},
 	}
@@ -528,5 +542,294 @@ func TestNASCreateVolume_AutoCreateService_CreateFails(t *testing.T) {
 	st, ok := status.FromError(err)
 	if !ok || st.Code() != codes.Internal {
 		t.Errorf("expected Internal error, got %v", err)
+	}
+}
+
+// --- NFS export policy (#12) ---
+
+func createReqWithParams(params map[string]string) *csi.CreateVolumeRequest {
+	return &csi.CreateVolumeRequest{
+		Name:          "test-pvc",
+		CapacityRange: &csi.CapacityRange{RequiredBytes: 1073741824},
+		VolumeCapabilities: []*csi.VolumeCapability{
+			{AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER}},
+		},
+		Parameters: params,
+	}
+}
+
+// captureShareCreate wires nfsMock to record the share create request.
+func captureShareCreate(nfsMock *mockNFSShareClient, got **vergeos.VolumeNFSShareCreateRequest) {
+	nfsMock.createFn = func(_ context.Context, req *vergeos.VolumeNFSShareCreateRequest) (*vergeos.VolumeNFSShare, error) {
+		*got = req
+		return &vergeos.VolumeNFSShare{ID: "share456", Name: req.Name, Volume: req.Volume}, nil
+	}
+}
+
+func TestCreateVolume_ShareRestrictedToAllowedHosts(t *testing.T) {
+	c, _, _, nfsMock := newTestController()
+	var got *vergeos.VolumeNFSShareCreateRequest
+	captureShareCreate(nfsMock, &got)
+
+	_, err := c.CreateVolume(context.Background(), createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas",
+		"allowedHosts":   " 10.0.0.0/24 , 192.168.1.7 ,",
+	}))
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got == nil {
+		t.Fatal("share was not created")
+	}
+	if got.AllowAll == nil || *got.AllowAll {
+		t.Errorf("AllowAll = %v, want false", got.AllowAll)
+	}
+	if got.AllowedHosts == nil || *got.AllowedHosts != "10.0.0.0/24,192.168.1.7" {
+		t.Errorf("AllowedHosts = %v, want 10.0.0.0/24,192.168.1.7", got.AllowedHosts)
+	}
+	if got.Squash == nil || *got.Squash != "root_squash" {
+		t.Errorf("Squash = %v, want root_squash default", got.Squash)
+	}
+}
+
+func TestCreateVolume_SquashOptIn(t *testing.T) {
+	c, _, _, nfsMock := newTestController()
+	var got *vergeos.VolumeNFSShareCreateRequest
+	captureShareCreate(nfsMock, &got)
+
+	_, err := c.CreateVolume(context.Background(), createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas",
+		"allowedHosts":   "10.0.0.0/24",
+		"squash":         "no_root_squash",
+	}))
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got.Squash == nil || *got.Squash != "no_root_squash" {
+		t.Errorf("Squash = %v, want no_root_squash", got.Squash)
+	}
+}
+
+func TestCreateVolume_ExplicitAllowAll(t *testing.T) {
+	c, _, _, nfsMock := newTestController()
+	var got *vergeos.VolumeNFSShareCreateRequest
+	captureShareCreate(nfsMock, &got)
+
+	_, err := c.CreateVolume(context.Background(), createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas",
+		"allowAll":       "true",
+	}))
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got.AllowAll == nil || !*got.AllowAll {
+		t.Errorf("AllowAll = %v, want true", got.AllowAll)
+	}
+	if got.AllowedHosts != nil {
+		t.Errorf("AllowedHosts = %q, want unset with allowAll", *got.AllowedHosts)
+	}
+	if got.Squash == nil || *got.Squash != "root_squash" {
+		t.Errorf("Squash = %v, want root_squash even with allowAll", got.Squash)
+	}
+}
+
+func TestCreateVolume_InvalidExportParams(t *testing.T) {
+	base := func(extra map[string]string) map[string]string {
+		p := map[string]string{"nasServiceName": "k8s-nas"}
+		for k, v := range extra {
+			p[k] = v
+		}
+		return p
+	}
+	for name, params := range map[string]map[string]string{
+		"neither allowedHosts nor allowAll": base(nil),
+		"allowAll false and no hosts":       base(map[string]string{"allowAll": "false"}),
+		"only separators in hosts":          base(map[string]string{"allowedHosts": " , "}),
+		"bad host entry":                    base(map[string]string{"allowedHosts": "10.0.0.0/24,not-an-ip"}),
+		"bad CIDR":                          base(map[string]string{"allowedHosts": "10.0.0.0/99"}),
+		"match-all IPv4 CIDR":               base(map[string]string{"allowedHosts": "10.0.0.0/24,0.0.0.0/0"}),
+		"match-all IPv6 CIDR":               base(map[string]string{"allowedHosts": "::/0"}),
+		"bad allowAll value":                base(map[string]string{"allowAll": "yes"}),
+		"allowAll with hosts":               base(map[string]string{"allowAll": "true", "allowedHosts": "10.0.0.0/24"}),
+		"bad squash":                        base(map[string]string{"allowedHosts": "10.0.0.0/24", "squash": "none"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, nasMock, volMock, nfsMock := newTestController()
+			calls := 0
+			nasMock.getByNameFn = func(_ context.Context, _ string) (*vergeos.NASService, error) {
+				calls++
+				return &vergeos.NASService{Key: 1, Name: "k8s-nas"}, nil
+			}
+			volMock.createFn = func(_ context.Context, _ *vergeos.VolumeCreateRequest) (*vergeos.Volume, error) {
+				calls++
+				return &vergeos.Volume{ID: "v"}, nil
+			}
+			nfsMock.createFn = func(_ context.Context, _ *vergeos.VolumeNFSShareCreateRequest) (*vergeos.VolumeNFSShare, error) {
+				calls++
+				return &vergeos.VolumeNFSShare{ID: "s"}, nil
+			}
+			_, err := c.CreateVolume(context.Background(), createReqWithParams(params))
+			if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+				t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
+			}
+			if calls != 0 {
+				t.Errorf("API was called %d times before parameter validation failed", calls)
+			}
+		})
+	}
+}
+
+func TestCreateVolume_ExistingShareNotAltered(t *testing.T) {
+	c, _, volMock, nfsMock := newTestController()
+	volMock.getByNameFn = func(_ context.Context, _ int, _ string) (*vergeos.Volume, error) {
+		return &vergeos.Volume{ID: "existingvol", MaxSize: 1073741824}, nil
+	}
+	nfsMock.getByNameFn = func(_ context.Context, _, _ string) (*vergeos.VolumeNFSShare, error) {
+		return &vergeos.VolumeNFSShare{ID: "existingshare", Volume: "existingvol"}, nil
+	}
+	nfsMock.createFn = func(_ context.Context, _ *vergeos.VolumeNFSShareCreateRequest) (*vergeos.VolumeNFSShare, error) {
+		t.Error("existing share must not be re-created or altered")
+		return nil, fmt.Errorf("unexpected")
+	}
+	if _, err := c.CreateVolume(context.Background(), createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas", "allowedHosts": "10.0.0.0/24",
+	})); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+}
+
+// --- On-demand NAS service creation (#13) ---
+
+func autoCreateController(nasMock *mockNASServiceClient) *NASController {
+	return &NASController{
+		nasServices:   nasMock,
+		volumes:       &mockVolumeClient{},
+		nfsShares:     &mockNFSShareClient{},
+		vmNICs:        &mockVMNICClient{},
+		vms:           &mockVMClient{},
+		machineStatus: &mockMachineStatusClient{},
+	}
+}
+
+func TestNASCreateVolume_AutoCreate_NameMismatchFailsWithoutRepeatedCreates(t *testing.T) {
+	// VergeOS derives the service name from the VM name; govergeos cannot set it.
+	// The created service is therefore named "vm-200", not "k8s-nas".
+	var svcOnVM *vergeos.NASService
+	creates := 0
+	nasMock := &mockNASServiceClient{
+		getByNameFn: func(_ context.Context, name string) (*vergeos.NASService, error) {
+			if svcOnVM != nil && svcOnVM.Name == name {
+				return svcOnVM, nil
+			}
+			return nil, &vergeos.NotFoundError{Resource: "NASService", ID: name}
+		},
+		getByVMFn: func(_ context.Context, _ int) (*vergeos.NASService, error) {
+			if svcOnVM != nil {
+				return svcOnVM, nil
+			}
+			return nil, &vergeos.NotFoundError{Resource: "NASService", ID: 200}
+		},
+		createFn: func(_ context.Context, _ *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error) {
+			creates++
+			svcOnVM = &vergeos.NASService{Key: 10, Name: "vm-200", VM: 200}
+			return svcOnVM, nil
+		},
+	}
+	c := autoCreateController(nasMock)
+	req := createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas", "nasServiceVM": "200", "allowedHosts": "10.0.0.0/24",
+	})
+
+	for i := 0; i < 3; i++ {
+		_, err := c.CreateVolume(context.Background(), req)
+		if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition {
+			t.Fatalf("attempt %d: code = %v, want FailedPrecondition (err=%v)", i, st.Code(), err)
+		}
+	}
+	if creates != 1 {
+		t.Errorf("NAS service creates = %d, want exactly 1 across retries", creates)
+	}
+}
+
+func TestNASCreateVolume_AutoCreate_ReusesServiceAlreadyOnVM(t *testing.T) {
+	nasMock := &mockNASServiceClient{
+		getByNameFn: func(_ context.Context, name string) (*vergeos.NASService, error) {
+			return nil, &vergeos.NotFoundError{Resource: "NASService", ID: name}
+		},
+		getByVMFn: func(_ context.Context, _ int) (*vergeos.NASService, error) {
+			return &vergeos.NASService{Key: 10, Name: "other", VM: 200}, nil
+		},
+		createFn: func(_ context.Context, _ *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error) {
+			t.Error("must not create a second NAS service on a VM that already has one")
+			return nil, fmt.Errorf("unexpected")
+		},
+	}
+	_, err := autoCreateController(nasMock).CreateVolume(context.Background(), createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas", "nasServiceVM": "200", "allowedHosts": "10.0.0.0/24",
+	}))
+	if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition (err=%v)", st.Code(), err)
+	}
+}
+
+func TestNASCreateVolume_AutoCreate_ConcurrentCallsCreateOnce(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		created *vergeos.NASService
+		creates int
+	)
+	nasMock := &mockNASServiceClient{
+		getByNameFn: func(_ context.Context, name string) (*vergeos.NASService, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if created != nil {
+				return created, nil
+			}
+			return nil, &vergeos.NotFoundError{Resource: "NASService", ID: name}
+		},
+		createFn: func(_ context.Context, _ *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error) {
+			time.Sleep(20 * time.Millisecond) // widen the race window
+			mu.Lock()
+			defer mu.Unlock()
+			creates++
+			created = &vergeos.NASService{Key: 10, Name: "k8s-nas", VM: 200}
+			return created, nil
+		},
+	}
+	c := autoCreateController(nasMock)
+	req := createReqWithParams(map[string]string{
+		"nasServiceName": "k8s-nas", "nasServiceVM": "200", "allowedHosts": "10.0.0.0/24", "nasServiceIP": "10.0.0.9",
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.CreateVolume(context.Background(), req); err != nil {
+				t.Errorf("CreateVolume: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if creates != 1 {
+		t.Errorf("NAS service creates = %d, want 1", creates)
+	}
+}
+
+func TestCreateVolume_BlockCapabilityRejected(t *testing.T) {
+	c, _, volMock, _ := newTestController()
+	volMock.createFn = func(_ context.Context, _ *vergeos.VolumeCreateRequest) (*vergeos.Volume, error) {
+		t.Error("no volume may be created for a block-mode capability")
+		return nil, fmt.Errorf("unexpected")
+	}
+	req := createReqWithParams(map[string]string{"nasServiceName": "k8s-nas", "allowedHosts": "10.0.0.0/24"})
+	req.VolumeCapabilities = []*csi.VolumeCapability{{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+	}}
+	_, err := c.CreateVolume(context.Background(), req)
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
 	}
 }

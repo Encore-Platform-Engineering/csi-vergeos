@@ -10,6 +10,7 @@ import (
 type NASServiceClient interface {
 	Get(ctx context.Context, id int) (*vergeos.NASService, error)
 	GetByName(ctx context.Context, name string) (*vergeos.NASService, error)
+	GetByVM(ctx context.Context, vmID int) (*vergeos.NASService, error)
 	Create(ctx context.Context, req *vergeos.NASServiceCreateRequest) (*vergeos.NASService, error)
 	Delete(ctx context.Context, id int) error
 }

@@ -28,9 +28,25 @@ func (ns *NodeService) WithNodeIDResolver(r NodeIDResolver) *NodeService {
 	return ns
 }
 
+// validateVolumeCapability enforces the CSI requirement that node RPCs carry a
+// capability with an access type (mount or block), so backends never fall back
+// to silently assuming a filesystem volume.
+func validateVolumeCapability(volCap *csi.VolumeCapability) error {
+	if volCap == nil {
+		return status.Error(codes.InvalidArgument, "volume capability is required")
+	}
+	if volCap.GetMount() == nil && volCap.GetBlock() == nil {
+		return status.Error(codes.InvalidArgument, "volume capability must specify an access type (mount or block)")
+	}
+	return nil
+}
+
 func (ns *NodeService) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	if ns.backend == nil {
 		return nil, status.Error(codes.Unimplemented, "node backend not configured")
+	}
+	if err := validateVolumeCapability(req.GetVolumeCapability()); err != nil {
+		return nil, err
 	}
 	return ns.backend.NodeStageVolume(ctx, req)
 }
@@ -45,6 +61,9 @@ func (ns *NodeService) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnsta
 func (ns *NodeService) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	if ns.backend == nil {
 		return nil, status.Error(codes.Unimplemented, "node backend not configured")
+	}
+	if err := validateVolumeCapability(req.GetVolumeCapability()); err != nil {
+		return nil, err
 	}
 	return ns.backend.NodePublishVolume(ctx, req)
 }

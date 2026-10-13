@@ -73,6 +73,7 @@ func createTestVolumeForNode(t *testing.T) (volumeID string, volumeContext map[s
 		},
 		Parameters: map[string]string{
 			"nasServiceName": testNASServiceName,
+			"allowedHosts":   "10.0.0.0/8",
 			"nasServiceIP":   testNASServiceIP,
 		},
 	}

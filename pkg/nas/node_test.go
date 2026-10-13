@@ -3,6 +3,7 @@ package nas
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -16,6 +17,10 @@ type mockMounter struct {
 	mountedPaths map[string]bool
 	mountErr     error
 	unmountErr   error
+
+	mountCalls  int
+	lastSource  string
+	lastOptions []string
 }
 
 func newMockMounter() *mockMounter {
@@ -27,6 +32,9 @@ func (m *mockMounter) IsMounted(path string) (bool, error) {
 }
 
 func (m *mockMounter) MountNFS(source, target string, options []string) error {
+	m.mountCalls++
+	m.lastSource = source
+	m.lastOptions = options
 	if m.mountErr != nil {
 		return m.mountErr
 	}
@@ -186,5 +194,75 @@ func TestNodeGetCapabilities_NAS(t *testing.T) {
 				t.Error("NAS node should not advertise STAGE_UNSTAGE_VOLUME")
 			}
 		}
+	}
+}
+
+func nasPublishReq(volCap *csi.VolumeCapability, readonly bool) *csi.NodePublishVolumeRequest {
+	return &csi.NodePublishVolumeRequest{
+		VolumeId:   "1:vol123:share456",
+		TargetPath: "/target",
+		Readonly:   readonly,
+		VolumeContext: map[string]string{
+			"nasServiceIP": "10.0.0.5",
+			"volumeName":   "csi-test-pvc",
+		},
+		VolumeCapability: volCap,
+	}
+}
+
+func mountCap(flags ...string) *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{MountFlags: flags}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+	}
+}
+
+func TestNodePublishVolume_MountOptionsReachMounter(t *testing.T) {
+	tests := []struct {
+		name     string
+		flags    []string
+		readonly bool
+		want     []string
+	}{
+		{"defaults when no flags", nil, false, []string{"hard", "nolock"}},
+		{"user flags are passed through", []string{"rsize=65536"}, false, []string{"hard", "rsize=65536", "nolock"}},
+		{"nfsvers=4.1 passed and nolock dropped", []string{"nfsvers=4.1"}, false, []string{"hard", "nfsvers=4.1"}},
+		{"vers=4 also drops nolock", []string{"vers=4"}, false, []string{"hard", "vers=4"}},
+		{"v4.1 drops nolock", []string{"v4.1"}, false, []string{"hard", "v4.1"}},
+		{"v4 drops nolock", []string{"v4"}, false, []string{"hard", "v4"}},
+		{"nfsvers=3 keeps nolock", []string{"nfsvers=3"}, false, []string{"hard", "nfsvers=3", "nolock"}},
+		{"user lock respected", []string{"lock"}, false, []string{"hard", "lock"}},
+		{"user soft replaces hard", []string{"soft"}, false, []string{"soft", "nolock"}},
+		{"readonly appended", nil, true, []string{"hard", "nolock", "ro"}},
+		{"readonly not duplicated", []string{"ro"}, true, []string{"hard", "ro", "nolock"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, mounter := newTestNode()
+			if _, err := node.NodePublishVolume(context.Background(), nasPublishReq(mountCap(tc.flags...), tc.readonly)); err != nil {
+				t.Fatalf("NodePublishVolume: %v", err)
+			}
+			if !reflect.DeepEqual(mounter.lastOptions, tc.want) {
+				t.Errorf("options = %v, want %v", mounter.lastOptions, tc.want)
+			}
+			if mounter.lastSource != "10.0.0.5:/mnt/csi-test-pvc" {
+				t.Errorf("source = %q", mounter.lastSource)
+			}
+		})
+	}
+}
+
+func TestNodePublishVolume_BlockCapabilityRejected(t *testing.T) {
+	node, mounter := newTestNode()
+	blockCap := &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+	}
+	_, err := node.NodePublishVolume(context.Background(), nasPublishReq(blockCap, false))
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
+	}
+	if mounter.mountCalls != 0 {
+		t.Error("NFS must not be mounted for a block-mode capability")
 	}
 }

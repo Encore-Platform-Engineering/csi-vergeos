@@ -76,4 +76,11 @@ for f in /tmp/chart-default.yaml deploy/kubernetes/node.yaml deploy/kubernetes/b
   want_n=$(yq eval -N 'select(.kind=="DaemonSet" or .kind=="Deployment") | .spec.template.spec.containers[] | select(.name | test("^liveness-probe")) | .name' "$f" | grep -c .)
   [ "$have" = "$want_n" ] || fail "$f: livenessprobe sidecar without --http-endpoint"
 done
+echo "== NAS export ACL parameters"
+nassc='select(.kind=="StorageClass" and .provisioner=="csi-nas.verge.io") | .parameters'
+q /tmp/chart-default.yaml "$nassc | select(.allowedHosts != null and .allowAll == null)" >/dev/null || fail "default NAS StorageClass must set allowedHosts and not allowAll"
+render --set nas.storageClass.allowAll=true > /tmp/chart-allowall.yaml
+q /tmp/chart-allowall.yaml "$nassc | select(.allowAll == \"true\" and .allowedHosts == null)" >/dev/null || fail "allowAll=true must render allowAll and no allowedHosts"
+q deploy/kubernetes/storageclass.yaml 'select(.provisioner=="csi-nas.verge.io") | .parameters | select(.allowedHosts != null)' >/dev/null || fail "deploy NAS StorageClass lacks allowedHosts"
+
 echo OK

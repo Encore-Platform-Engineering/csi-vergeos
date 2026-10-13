@@ -59,11 +59,54 @@ func TestNodeService_DelegatesToBackend(t *testing.T) {
 	mock := &mockNodeBackend{}
 	ns := &NodeService{nodeID: "test-node", backend: mock}
 
-	_, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{})
+	_, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+		},
+	})
 	if err != nil {
 		t.Fatalf("NodePublishVolume failed: %v", err)
 	}
 	if !mock.publishCalled {
 		t.Error("expected NodePublishVolume to delegate to backend")
+	}
+}
+
+func TestNodeService_RejectsMissingVolumeCapability(t *testing.T) {
+	noAccessType := &csi.VolumeCapability{
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+	}
+	for name, volCap := range map[string]*csi.VolumeCapability{
+		"nil capability":     nil,
+		"no access type set": noAccessType,
+	} {
+		t.Run(name, func(t *testing.T) {
+			mock := &mockNodeBackend{}
+			ns := &NodeService{nodeID: "n", backend: mock}
+
+			_, pubErr := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeCapability: volCap})
+			_, stageErr := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{VolumeCapability: volCap})
+			for op, err := range map[string]error{"publish": pubErr, "stage": stageErr} {
+				if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+					t.Errorf("%s: code = %v, want InvalidArgument (err=%v)", op, st.Code(), err)
+				}
+			}
+			if mock.publishCalled {
+				t.Error("backend must not be called with an invalid capability")
+			}
+		})
+	}
+}
+
+func TestNodeService_AcceptsBlockCapability(t *testing.T) {
+	mock := &mockNodeBackend{}
+	ns := &NodeService{nodeID: "n", backend: mock}
+	_, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		},
+	})
+	if err != nil || !mock.publishCalled {
+		t.Fatalf("block capability should reach backend: err=%v called=%v", err, mock.publishCalled)
 	}
 }

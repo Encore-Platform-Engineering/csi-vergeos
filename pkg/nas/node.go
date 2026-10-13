@@ -3,6 +3,7 @@ package nas
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -34,6 +35,11 @@ func (n *NASNode) NodePublishVolume(_ context.Context, req *csi.NodePublishVolum
 
 	targetPath := req.TargetPath
 
+	// NFS exports are filesystems; raw block volumes cannot be served.
+	if req.VolumeCapability.GetBlock() != nil {
+		return nil, status.Error(codes.InvalidArgument, "NAS volumes do not support volumeMode: Block")
+	}
+
 	// Idempotency: check if already mounted.
 	mounted, err := n.mounter.IsMounted(targetPath)
 	if err != nil {
@@ -58,14 +64,7 @@ func (n *NASNode) NodePublishVolume(_ context.Context, req *csi.NodePublishVolum
 	// VergeOS NAS exports volumes under /mnt/.
 	source := fmt.Sprintf("%s:/mnt/%s", nasIP, volumeName)
 
-	// Default NFS mount options.
-	// nolock: rpc.statd is not available in the CSI node container.
-	options := []string{"hard", "nolock"}
-
-	// Add read-only if requested.
-	if req.Readonly {
-		options = append(options, "ro")
-	}
+	options := nfsMountOptions(req.VolumeCapability.GetMount().GetMountFlags(), req.Readonly)
 
 	klog.Infof("NFS mounting %s to %s", source, targetPath)
 	if err := n.mounter.MountNFS(source, targetPath, options); err != nil {
@@ -111,4 +110,49 @@ func (n *NASNode) NodeUnstageVolume(_ context.Context, _ *csi.NodeUnstageVolumeR
 func (n *NASNode) NodeGetCapabilities() []*csi.NodeServiceCapability {
 	// NAS does NOT advertise STAGE_UNSTAGE_VOLUME — NFS doesn't need staging.
 	return []*csi.NodeServiceCapability{}
+}
+
+// nfsMountOptions merges StorageClass mountOptions with the driver defaults.
+//
+// Defaults: "hard", and "nolock" because rpc.statd is not available in the CSI
+// node container. User options win: "hard" is dropped when the user picks
+// soft/hard, and "nolock" is dropped when the user sets lock/nolock/local_lock
+// or selects NFSv4 (nfsvers/vers=4*, v4/v4.1/v4.2, which has in-protocol locking and needs no
+// statd).
+func nfsMountOptions(userFlags []string, readonly bool) []string {
+	var (
+		hasHardSoft, hasLock, nfsv4, hasRO bool
+		options                            []string
+	)
+	for _, f := range userFlags {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		switch k, v, _ := strings.Cut(f, "="); k {
+		case "hard", "soft":
+			hasHardSoft = true
+		case "lock", "nolock", "local_lock":
+			hasLock = true
+		case "nfsvers", "vers":
+			if strings.HasPrefix(v, "4") {
+				nfsv4 = true
+			}
+		case "v4", "v4.0", "v4.1", "v4.2":
+			nfsv4 = true
+		case "ro":
+			hasRO = true
+		}
+		options = append(options, f)
+	}
+	if !hasHardSoft {
+		options = append([]string{"hard"}, options...)
+	}
+	if !hasLock && !nfsv4 {
+		options = append(options, "nolock")
+	}
+	if readonly && !hasRO {
+		options = append(options, "ro")
+	}
+	return options
 }
