@@ -3,6 +3,8 @@ package block
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vergeos "github.com/verge-io/govergeos"
@@ -150,19 +152,64 @@ type nodeVMInfo struct {
 	machineID int // Internal machine reference — used for drive assignment
 }
 
-// resolveNodeVM looks up the VergeOS VM for a Kubernetes node by matching
-// the node name against VM names in the VergeOS API.
-func (c *BlockController) resolveNodeVM(ctx context.Context, nodeID string) (*nodeVMInfo, error) {
-	vms, err := c.vms.List(ctx, vergeos.WithFilter(fmt.Sprintf("name eq '%s'", nodeID)))
+// escapeFilterString escapes a value for use inside a single-quoted VergeOS
+// filter string.
+func escapeFilterString(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s)
+}
+
+// findVM lists non-snapshot VMs with `filter`, keeps those accepted by match
+// (the API filter is re-checked client-side) and requires exactly one.
+// Returns gRPC errors: Unavailable (API failure), NotFound, FailedPrecondition
+// (ambiguous).
+func (c *BlockController) findVM(ctx context.Context, what, filter string, match func(vergeos.VM) bool) (*nodeVMInfo, error) {
+	vms, err := c.vms.List(ctx, vergeos.WithFilter(filter+" and is_snapshot eq false"))
 	if err != nil {
-		return nil, fmt.Errorf("listing VMs to find node %q: %w", nodeID, err)
+		return nil, status.Errorf(codes.Unavailable, "listing VMs to find %s: %v", what, err)
 	}
+	var found []vergeos.VM
 	for _, vm := range vms {
-		if vm.Name == nodeID {
-			return &nodeVMInfo{vmID: vm.ID.Int(), machineID: vm.Machine}, nil
+		if !vm.IsSnapshot && match(vm) {
+			found = append(found, vm)
 		}
 	}
-	return nil, fmt.Errorf("no VergeOS VM found matching node %q", nodeID)
+	switch len(found) {
+	case 0:
+		return nil, status.Errorf(codes.NotFound, "no VergeOS VM found matching %s", what)
+	case 1:
+		return &nodeVMInfo{vmID: found[0].ID.Int(), machineID: found[0].Machine}, nil
+	default:
+		return nil, status.Errorf(codes.FailedPrecondition, "%d VergeOS VMs match %s; refusing to guess", len(found), what)
+	}
+}
+
+// resolveNodeVM looks up the VergeOS VM for a CSI node ID. The ID is
+// `uuid:<vm uuid>`, `key:<vm $key>`, `name:<vm name>` or a bare VM name
+// (legacy). Malformed IDs are InvalidArgument.
+func (c *BlockController) resolveNodeVM(ctx context.Context, nodeID string) (*nodeVMInfo, error) {
+	kind, value, err := driver.ParseNodeID(nodeID)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	what := fmt.Sprintf("node %q", nodeID)
+	switch kind {
+	case driver.NodeIDKindUUID:
+		return c.findVM(ctx, what, fmt.Sprintf("uuid eq '%s'", value),
+			func(vm vergeos.VM) bool { return strings.EqualFold(vm.UUID, value) })
+	case driver.NodeIDKindKey:
+		return c.findVM(ctx, what, fmt.Sprintf("$key eq %s", value),
+			func(vm vergeos.VM) bool { return strconv.Itoa(vm.ID.Int()) == value })
+	default:
+		return c.findVM(ctx, what, fmt.Sprintf("name eq '%s'", escapeFilterString(value)),
+			func(vm vergeos.VM) bool { return vm.Name == value })
+	}
+}
+
+// vmForMachine finds the VM that owns internal machine ID machineID, i.e. the
+// VM a drive is currently attached to.
+func (c *BlockController) vmForMachine(ctx context.Context, machineID int) (*nodeVMInfo, error) {
+	return c.findVM(ctx, fmt.Sprintf("machine %d", machineID), fmt.Sprintf("machine eq %d", machineID),
+		func(vm vergeos.VM) bool { return vm.Machine == machineID })
 }
 
 func (c *BlockController) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
@@ -178,10 +225,10 @@ func (c *BlockController) ControllerPublishVolume(ctx context.Context, req *csi.
 		return nil, status.Errorf(codes.InvalidArgument, "invalid volume ID: %v", err)
 	}
 
-	// Resolve the Kubernetes node name to a VergeOS VM.
+	// Resolve the CSI node ID (uuid:/key:/name:) to a VergeOS VM.
 	target, err := c.resolveNodeVM(ctx, req.NodeId)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "resolving node VM: %v", err)
+		return nil, err
 	}
 
 	// Get the drive to check current state.
@@ -250,16 +297,14 @@ func (c *BlockController) ControllerUnpublishVolume(ctx context.Context, req *cs
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
 
-	// Hot-unplug the drive from the current VM before moving it.
-	// Resolve which VM currently owns it so we can send the hotplug action.
+	// Hot-unplug the drive from the VM that owns it (found via drive.Machine,
+	// not the node ID, which may have changed since attach).
 	if drive.PowerState == "online" {
-		if req.NodeId != "" {
-			nodeVM, err := c.resolveNodeVM(ctx, req.NodeId)
-			if err == nil {
-				if err := c.vmDrives.HotUnplugDrive(ctx, nodeVM.vmID, driveID); err != nil {
-					klog.Warningf("Hot-unplug drive %d from VM %d failed: %v (will still move)", driveID, nodeVM.vmID, err)
-				}
-			}
+		owner, err := c.vmForMachine(ctx, drive.Machine)
+		if err != nil {
+			klog.Warningf("Finding owner VM of drive %d (machine %d) for hot-unplug failed: %v (will still move)", driveID, drive.Machine, err)
+		} else if err := c.vmDrives.HotUnplugDrive(ctx, owner.vmID, driveID); err != nil {
+			klog.Warningf("Hot-unplug drive %d from VM %d failed: %v (will still move)", driveID, owner.vmID, err)
 		}
 	}
 

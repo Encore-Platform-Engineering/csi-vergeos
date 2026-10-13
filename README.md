@@ -62,7 +62,7 @@ This CSI driver delegates storage operations directly to the VergeOS API, lettin
 The block driver uses a **pool VM** — a dedicated VergeOS VM that acts as a holding area for drives when they're not attached to a Kubernetes node. The pool VM doesn't need to be running; it's just an owner for idle drives. Create any VM in VergeOS for this purpose and pass its ID as `--pool-vm-id` (or `block.poolVmId` in Helm).
 
 1. **CreateVolume** — creates a VM drive on the pool VM with a deterministic serial number.
-2. **ControllerPublishVolume** — moves the drive from the pool VM to the target node's VM.
+2. **ControllerPublishVolume** — moves the drive from the pool VM to the target node's VM. The VM is found from the Node's `spec.providerID`, not its name: the node plugin reads its own Node (needs `get nodes`) and reports `uuid:<uuid>` for `vergeos://<uuid>` (Cluster API) or `key:<n>` for legacy `vergeos://<n>`; with no providerID yet it reports `name:<node name>` (with a warning) unless `--require-provider-id` is set. Detach finds the VM from the drive's current owner, not the node ID. Lookups skip snapshot VMs and fail if more than one VM matches. Bare node names from older installs still resolve by VM name.
 3. **NodeStageVolume** — discovers the device by serial in `/dev/disk/by-id/`, formats (EXT4), and mounts to a staging path.
 4. **NodePublishVolume** — bind-mounts the staging path into the pod.
 5. **ControllerUnpublishVolume** — moves the drive back to the pool VM when the pod is done.
@@ -179,7 +179,8 @@ The binary takes these flags:
 | `--driver` | `nas` / `block` | Which CSI driver name to register |
 | `--mode` | `controller` / `node` | Which gRPC services to run |
 | `--endpoint` | `unix:///csi/csi.sock` | gRPC listen address |
-| `--node-id` | hostname | Node identity (node mode only) |
+| `--node-id` | hostname | Kubernetes Node name (node mode only). The block driver reports its CSI node ID from the Node's `spec.providerID` (see below) |
+| `--require-provider-id` | `false` | Block node: fail `NodeGetInfo` (Unavailable, so the registrar retries) until the Node has a `vergeos://` providerID, instead of falling back to the Node name. Helm: `requireProviderId`. Set `true` on Cluster API / k0s clusters running the CCM |
 | `--pool-vm-id` | integer | Pool VM for block drives (block controller only) |
 
 API credentials are read from environment variables (`VERGEOS_HOST`, `VERGEOS_API_KEY`, `VERGEOS_VERIFY_SSL`), typically sourced from a Kubernetes Secret.

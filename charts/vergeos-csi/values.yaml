@@ -67,3 +67,9 @@ node:
       memory: 128Mi
 
 logLevel: 5
+
+# Block node plugin: wait for Node.spec.providerID (vergeos://<uuid>) instead of
+# falling back to the Node name. Set true on Cluster API / k0s clusters that run
+# the vergeos cloud controller manager, otherwise a node registered before the
+# CCM sets providerID keeps a name-based ID and attaches fail.
+requireProviderId: false
