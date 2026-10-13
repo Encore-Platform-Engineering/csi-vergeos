@@ -9,11 +9,10 @@ parameters:
   {{- if .Values.nas.storageClass.nasServiceIP }}
   nasServiceIP: {{ .Values.nas.storageClass.nasServiceIP | quote }}
   {{- end }}
-  {{- if .Values.nas.storageClass.allowedHosts }}
-  allowedHosts: {{ .Values.nas.storageClass.allowedHosts | quote }}
-  {{- end }}
   {{- if .Values.nas.storageClass.allowAll }}
   allowAll: "true"
+  {{- else if .Values.nas.storageClass.allowedHosts }}
+  allowedHosts: {{ .Values.nas.storageClass.allowedHosts | quote }}
   {{- end }}
   {{- if .Values.nas.storageClass.squash }}
   squash: {{ .Values.nas.storageClass.squash | quote }}

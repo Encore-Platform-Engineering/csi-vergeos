@@ -228,6 +228,8 @@ func TestNodePublishVolume_MountOptionsReachMounter(t *testing.T) {
 		{"user flags are passed through", []string{"rsize=65536"}, false, []string{"hard", "rsize=65536", "nolock"}},
 		{"nfsvers=4.1 passed and nolock dropped", []string{"nfsvers=4.1"}, false, []string{"hard", "nfsvers=4.1"}},
 		{"vers=4 also drops nolock", []string{"vers=4"}, false, []string{"hard", "vers=4"}},
+		{"v4.1 drops nolock", []string{"v4.1"}, false, []string{"hard", "v4.1"}},
+		{"v4 drops nolock", []string{"v4"}, false, []string{"hard", "v4"}},
 		{"nfsvers=3 keeps nolock", []string{"nfsvers=3"}, false, []string{"hard", "nfsvers=3", "nolock"}},
 		{"user lock respected", []string{"lock"}, false, []string{"hard", "lock"}},
 		{"user soft replaces hard", []string{"soft"}, false, []string{"soft", "nolock"}},

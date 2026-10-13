@@ -160,7 +160,9 @@ Each PV gets its own NFS share. StorageClass parameters control who may mount it
 | `allowAll` | `false` | `"true"` exports to every host. Mutually exclusive with `allowedHosts` |
 | `squash` | `root_squash` | `root_squash`, `all_squash` or `no_root_squash` |
 
-`CreateVolume` fails with `InvalidArgument` if neither `allowedHosts` nor `allowAll: "true"` is set. Existing shares are never modified.
+`CreateVolume` fails with `InvalidArgument` if neither `allowedHosts` nor `allowAll: "true"` is set, or if `allowedHosts` contains `0.0.0.0/0` (use `allowAll` for that). Existing shares are never modified.
+
+**Upgrading:** StorageClass `parameters` are immutable, so `helm upgrade` cannot add them to an existing `vergeos-nas` StorageClass. Delete and recreate it (`kubectl delete sc vergeos-nas`, then `helm upgrade`); existing PVs are untouched. Old StorageClasses without `allowedHosts` now fail provisioning.
 
 Default decision: the driver is fail-closed with `root_squash`. The Helm chart and `deploy/` StorageClass ship `allowedHosts` = RFC1918 private ranges and `squash: no_root_squash` so NAS works out of the box: fresh exports are root-owned and `fsGroup` does not apply to NFS, so root-squashed pods could not write. Narrow `allowedHosts` to your node subnets for production. Mount options from the StorageClass `mountOptions` (e.g. `nfsvers=4.1`) are passed to `mount`; `nolock` is only added when you do not choose NFSv4 or set `lock`/`nolock` yourself.
 

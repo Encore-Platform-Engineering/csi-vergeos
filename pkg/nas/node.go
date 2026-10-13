@@ -117,7 +117,7 @@ func (n *NASNode) NodeGetCapabilities() []*csi.NodeServiceCapability {
 // Defaults: "hard", and "nolock" because rpc.statd is not available in the CSI
 // node container. User options win: "hard" is dropped when the user picks
 // soft/hard, and "nolock" is dropped when the user sets lock/nolock/local_lock
-// or selects NFSv4 (nfsvers/vers=4*, which has in-protocol locking and needs no
+// or selects NFSv4 (nfsvers/vers=4*, v4/v4.1/v4.2, which has in-protocol locking and needs no
 // statd).
 func nfsMountOptions(userFlags []string, readonly bool) []string {
 	var (
@@ -138,6 +138,8 @@ func nfsMountOptions(userFlags []string, readonly bool) []string {
 			if strings.HasPrefix(v, "4") {
 				nfsv4 = true
 			}
+		case "v4", "v4.0", "v4.1", "v4.2":
+			nfsv4 = true
 		case "ro":
 			hasRO = true
 		}

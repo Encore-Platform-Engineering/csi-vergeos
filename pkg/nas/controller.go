@@ -64,8 +64,12 @@ func parseExportConfig(params map[string]string) (*nfsExportConfig, error) {
 				continue
 			}
 			if net.ParseIP(h) == nil {
-				if _, _, err := net.ParseCIDR(h); err != nil {
+				_, ipNet, err := net.ParseCIDR(h)
+				if err != nil {
 					return nil, status.Errorf(codes.InvalidArgument, "invalid allowedHosts entry %q: must be an IP address or CIDR", h)
+				}
+				if ones, _ := ipNet.Mask.Size(); ones == 0 {
+					return nil, status.Errorf(codes.InvalidArgument, "allowedHosts entry %q matches every host: set 'allowAll: \"true\"' instead", h)
 				}
 			}
 			hosts = append(hosts, h)
@@ -112,6 +116,12 @@ func (c *NASController) CreateVolume(ctx context.Context, req *csi.CreateVolumeR
 	nasServiceName := req.Parameters["nasServiceName"]
 	if nasServiceName == "" {
 		return nil, status.Error(codes.InvalidArgument, "StorageClass parameter 'nasServiceName' is required")
+	}
+
+	for _, volCap := range req.VolumeCapabilities {
+		if volCap.GetBlock() != nil {
+			return nil, status.Error(codes.InvalidArgument, "NAS volumes do not support volumeMode: Block")
+		}
 	}
 
 	// Validate the export access policy before touching the VergeOS API.

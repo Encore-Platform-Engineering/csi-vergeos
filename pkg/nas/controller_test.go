@@ -647,6 +647,8 @@ func TestCreateVolume_InvalidExportParams(t *testing.T) {
 		"only separators in hosts":          base(map[string]string{"allowedHosts": " , "}),
 		"bad host entry":                    base(map[string]string{"allowedHosts": "10.0.0.0/24,not-an-ip"}),
 		"bad CIDR":                          base(map[string]string{"allowedHosts": "10.0.0.0/99"}),
+		"match-all IPv4 CIDR":               base(map[string]string{"allowedHosts": "10.0.0.0/24,0.0.0.0/0"}),
+		"match-all IPv6 CIDR":               base(map[string]string{"allowedHosts": "::/0"}),
 		"bad allowAll value":                base(map[string]string{"allowAll": "yes"}),
 		"allowAll with hosts":               base(map[string]string{"allowAll": "true", "allowedHosts": "10.0.0.0/24"}),
 		"bad squash":                        base(map[string]string{"allowedHosts": "10.0.0.0/24", "squash": "none"}),
@@ -812,5 +814,22 @@ func TestNASCreateVolume_AutoCreate_ConcurrentCallsCreateOnce(t *testing.T) {
 	wg.Wait()
 	if creates != 1 {
 		t.Errorf("NAS service creates = %d, want 1", creates)
+	}
+}
+
+func TestCreateVolume_BlockCapabilityRejected(t *testing.T) {
+	c, _, volMock, _ := newTestController()
+	volMock.createFn = func(_ context.Context, _ *vergeos.VolumeCreateRequest) (*vergeos.Volume, error) {
+		t.Error("no volume may be created for a block-mode capability")
+		return nil, fmt.Errorf("unexpected")
+	}
+	req := createReqWithParams(map[string]string{"nasServiceName": "k8s-nas", "allowedHosts": "10.0.0.0/24"})
+	req.VolumeCapabilities = []*csi.VolumeCapability{{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER},
+	}}
+	_, err := c.CreateVolume(context.Background(), req)
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (err=%v)", st.Code(), err)
 	}
 }
