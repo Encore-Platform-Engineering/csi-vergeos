@@ -62,6 +62,9 @@ spec:
             - "--mode=node"
             - "--endpoint=unix:///csi-block/csi.sock"
             - "--node-id=$(NODE_NAME)"
+            {{- if .Values.requireProviderId }}
+            - "--require-provider-id"
+            {{- end }}
             - "--v={{ .Values.logLevel }}"
           env:
             - name: NODE_NAME

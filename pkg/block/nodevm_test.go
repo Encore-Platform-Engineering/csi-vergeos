@@ -2,6 +2,7 @@ package block
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -68,8 +69,9 @@ func TestResolveNodeVM_Forms(t *testing.T) {
 func TestResolveNodeVM_NotFound(t *testing.T) {
 	c, _ := nodeVMController(vergeos.VM{ID: 78, UUID: "11111111-2222-3333-4444-555555555555", Name: "other"})
 	for _, id := range []string{"uuid:" + testVMUUID, "key:77", "name:" + testVMName, testVMName} {
-		if _, err := c.resolveNodeVM(context.Background(), id); err == nil || !strings.Contains(err.Error(), "no VergeOS VM") {
-			t.Errorf("%s: err = %v, want not found", id, err)
+		_, err := c.resolveNodeVM(context.Background(), id)
+		if st, _ := status.FromError(err); st.Code() != codes.NotFound {
+			t.Errorf("%s: err = %v, want NotFound", id, err)
 		}
 	}
 }
@@ -99,17 +101,18 @@ func TestResolveNodeVM_RejectsAmbiguous(t *testing.T) {
 	for _, id := range []string{"uuid:" + testVMUUID, "name:" + testVMName, testVMName} {
 		c, _ := nodeVMController(a, b)
 		_, err := c.resolveNodeVM(context.Background(), id)
-		if err == nil || !strings.Contains(err.Error(), "2 VergeOS VMs match") {
-			t.Errorf("%s: err = %v, want ambiguity error", id, err)
+		if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition || !strings.Contains(err.Error(), "2 VergeOS VMs match") {
+			t.Errorf("%s: err = %v, want FailedPrecondition ambiguity error", id, err)
 		}
 	}
 }
 
 func TestResolveNodeVM_InvalidIDs(t *testing.T) {
 	c, filters := nodeVMController()
-	for _, id := range []string{"uuid:not-a-uuid", "key:abc", "key:", "name:", "name:a' or 1 eq 1", "uuid:" + testVMUUID + "' or name eq 'x"} {
-		if _, err := c.resolveNodeVM(context.Background(), id); err == nil {
-			t.Errorf("%q: expected error", id)
+	for _, id := range []string{"uuid:not-a-uuid", "key:abc", "key:", "name:", "uuid:" + testVMUUID + "' or name eq 'x"} {
+		_, err := c.resolveNodeVM(context.Background(), id)
+		if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument {
+			t.Errorf("%q: code = %v, want InvalidArgument (err=%v)", id, st.Code(), err)
 		}
 	}
 	if len(*filters) != 0 {
@@ -145,7 +148,80 @@ func TestPublishUnpublish_ByUUIDNodeID(t *testing.T) {
 	}
 }
 
-func TestPublish_AmbiguousNodeIsNotFound(t *testing.T) {
+func TestResolveNodeVM_EscapesNameFilter(t *testing.T) {
+	name := `o'brien\vm`
+	c, filters := nodeVMController(vergeos.VM{ID: 5, Name: name, Machine: 50})
+	got, err := c.resolveNodeVM(context.Background(), "name:"+name)
+	if err != nil || got.vmID != 5 {
+		t.Fatalf("got (%v, %v)", got, err)
+	}
+	want := `name eq 'o\'brien\\vm' and is_snapshot eq false`
+	if (*filters)[0] != want {
+		t.Errorf("filter = %q, want %q", (*filters)[0], want)
+	}
+}
+
+func TestResolveNodeVM_APIErrorIsUnavailable(t *testing.T) {
+	c, _ := nodeVMController()
+	c.vms.(*mockVMClient).listFn = func(context.Context, ...vergeos.ListOption) ([]vergeos.VM, error) {
+		return nil, errors.New("connection refused")
+	}
+	_, err := c.resolveNodeVM(context.Background(), "uuid:"+testVMUUID)
+	if st, _ := status.FromError(err); st.Code() != codes.Unavailable {
+		t.Errorf("code = %v, want Unavailable (err=%v)", st.Code(), err)
+	}
+}
+
+// The drive is attached to a VM resolved from the node ID at publish time; at
+// unpublish the node ID may differ (e.g. name: -> uuid: after re-registration),
+// so the unplug must target the VM that owns the drive.
+func TestUnpublish_UnplugsOwnerVMNotNodeID(t *testing.T) {
+	owner := vergeos.VM{ID: 77, UUID: testVMUUID, Name: testVMName, Machine: 770}
+	bystander := vergeos.VM{ID: 78, Name: "stale-name", Machine: 780}
+	c, filters := nodeVMController(bystander, owner)
+	drives := c.vmDrives.(*mockVMDriveClient)
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Machine: 770, PowerState: "online"}
+	var unplugged []int
+	c.vmDrives = &unplugRecorder{mockVMDriveClient: drives, vmIDs: &unplugged}
+
+	// Node ID names a different VM than the one owning the drive.
+	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100", NodeId: "name:stale-name"}); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	if len(unplugged) != 1 || unplugged[0] != 77 {
+		t.Errorf("unplugged VMs = %v, want [77]", unplugged)
+	}
+	if len(*filters) != 1 || (*filters)[0] != "machine eq 770 and is_snapshot eq false" {
+		t.Errorf("filters = %q", *filters)
+	}
+	if drives.drives[100].Machine != 10 {
+		t.Errorf("drive machine = %d, want pool 10", drives.drives[100].Machine)
+	}
+}
+
+type unplugRecorder struct {
+	*mockVMDriveClient
+	vmIDs *[]int
+}
+
+func (u *unplugRecorder) HotUnplugDrive(_ context.Context, vmID, _ int) error {
+	*u.vmIDs = append(*u.vmIDs, vmID)
+	return nil
+}
+
+func TestUnpublish_NoOwnerVMStillDetaches(t *testing.T) {
+	c, _ := nodeVMController() // no VMs at all
+	drives := c.vmDrives.(*mockVMDriveClient)
+	drives.drives[100] = &vergeos.VMDrive{ID: 100, Machine: 770, PowerState: "online"}
+	if _, err := c.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "100"}); err != nil {
+		t.Fatalf("unpublish: %v", err)
+	}
+	if drives.drives[100].Machine != 10 {
+		t.Errorf("drive machine = %d, want pool 10", drives.drives[100].Machine)
+	}
+}
+
+func TestPublish_AmbiguousNodeIsFailedPrecondition(t *testing.T) {
 	c, _ := nodeVMController(
 		vergeos.VM{ID: 1, Name: testVMName, Machine: 10},
 		vergeos.VM{ID: 2, Name: testVMName, Machine: 20},
@@ -158,7 +234,7 @@ func TestPublish_AmbiguousNodeIsNotFound(t *testing.T) {
 			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
 		},
 	})
-	if st, _ := status.FromError(err); st.Code() != codes.NotFound {
-		t.Errorf("code = %v, want NotFound (err=%v)", st.Code(), err)
+	if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition (err=%v)", st.Code(), err)
 	}
 }

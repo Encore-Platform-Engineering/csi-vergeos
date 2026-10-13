@@ -23,6 +23,10 @@ type Config struct {
 	// in-cluster Kubernetes API is used if available, otherwise NodeID is
 	// reported as is.
 	NodeIDResolver NodeIDResolver
+	// RequireProviderID (block node mode): NodeGetInfo fails with Unavailable
+	// until the Node has a vergeos:// providerID, instead of falling back to
+	// the Node name. Ignored when NodeIDResolver is set.
+	RequireProviderID bool
 }
 
 // Driver is the top-level CSI driver. It owns the gRPC server and all services.
@@ -58,10 +62,17 @@ func New(cfg Config) (*Driver, error) {
 		// Only the block driver maps node IDs to VMs; NAS keeps the plain name.
 		resolver := cfg.NodeIDResolver
 		if resolver == nil && cfg.DriverType == BlockDriver {
-			if r, ok := NewInClusterNodeIDResolver(cfg.NodeID); ok {
-				resolver = r
+			r, err := NewInClusterNodeIDResolver(cfg.NodeID, cfg.RequireProviderID)
+			if err != nil {
+				return nil, fmt.Errorf("in-cluster node ID resolver: %w", err)
+			}
+			if r == nil {
+				if cfg.RequireProviderID {
+					return nil, fmt.Errorf("--require-provider-id needs the in-cluster Kubernetes API (KUBERNETES_SERVICE_HOST/PORT unset)")
+				}
+				klog.Warning("Not running in a cluster (KUBERNETES_SERVICE_HOST/PORT unset); node ID is not derived from providerID")
 			} else {
-				klog.Warning("Not running in a cluster; node ID is not derived from providerID")
+				resolver = r
 			}
 		}
 		if resolver != nil {

@@ -25,6 +25,7 @@ func main() {
 		mode       = flag.String("mode", "", "service mode: controller or node")
 		endpoint   = flag.String("endpoint", "unix:///csi/csi.sock", "CSI gRPC endpoint (unix:// only)")
 		nodeID     = flag.String("node-id", "", "node ID reported by the node service (node mode)")
+		reqProvID  = flag.Bool("require-provider-id", false, "block node: wait for Node.spec.providerID (vergeos://) instead of falling back to the Node name")
 		poolVMID   = flag.Int("pool-vm-id", 0, "VergeOS VM $key that holds unattached drives (block controller)")
 		version    = flag.Bool("version", false, "print version and exit")
 	)
@@ -36,19 +37,20 @@ func main() {
 		return
 	}
 
-	if err := run(*driverType, *mode, *endpoint, *nodeID, *poolVMID); err != nil {
+	if err := run(*driverType, *mode, *endpoint, *nodeID, *poolVMID, *reqProvID); err != nil {
 		klog.Errorf("csi-vergeos: %v", err)
 		klog.Flush()
 		os.Exit(1)
 	}
 }
 
-func run(driverType, mode, endpoint, nodeID string, poolVMID int) error {
+func run(driverType, mode, endpoint, nodeID string, poolVMID int, requireProviderID bool) error {
 	cfg := driver.Config{
-		DriverType: driver.DriverType(driverType),
-		Mode:       driver.DriverMode(mode),
-		Endpoint:   endpoint,
-		NodeID:     nodeID,
+		DriverType:        driver.DriverType(driverType),
+		Mode:              driver.DriverMode(mode),
+		Endpoint:          endpoint,
+		NodeID:            nodeID,
+		RequireProviderID: requireProviderID,
 	}
 	if err := validate(cfg, poolVMID); err != nil {
 		return err

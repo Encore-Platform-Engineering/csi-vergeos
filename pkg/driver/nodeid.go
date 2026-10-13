@@ -58,8 +58,8 @@ func ParseNodeID(nodeID string) (NodeIDKind, string, error) {
 		}
 		value = strconv.Itoa(n)
 	case NodeIDKindName:
-		if value == "" || strings.ContainsAny(value, "'\\") {
-			return "", "", fmt.Errorf("node ID %q: invalid VM name", nodeID)
+		if value == "" {
+			return "", "", fmt.Errorf("node ID %q: empty VM name", nodeID)
 		}
 	}
 	return kind, value, nil
@@ -67,15 +67,18 @@ func ParseNodeID(nodeID string) (NodeIDKind, string, error) {
 
 // NodeIDFromProviderID derives a CSI node ID from a Node's spec.providerID.
 // Accepts `vergeos://<uuid>` (Cluster API) and `vergeos://<int $key>` (legacy
-// CCM). Anything else, including empty, falls back to `name:<nodeName>`.
-func NodeIDFromProviderID(nodeName, providerID string) string {
-	if rest, ok := strings.CutPrefix(providerID, providerIDPrefix); ok {
+// CCM) and returns ok=true. Anything else, including empty, yields
+// `name:<nodeName>` with ok=false.
+func NodeIDFromProviderID(nodeName, providerID string) (id string, ok bool) {
+	if rest, found := strings.CutPrefix(providerID, providerIDPrefix); found {
 		switch {
 		case uuidRe.MatchString(rest):
-			return FormatNodeID(NodeIDKindUUID, strings.ToLower(rest))
+			return FormatNodeID(NodeIDKindUUID, strings.ToLower(rest)), true
 		case digitsRe.MatchString(rest):
-			return FormatNodeID(NodeIDKindKey, rest)
+			if n, err := strconv.Atoi(rest); err == nil {
+				return FormatNodeID(NodeIDKindKey, strconv.Itoa(n)), true
+			}
 		}
 	}
-	return FormatNodeID(NodeIDKindName, nodeName)
+	return FormatNodeID(NodeIDKindName, nodeName), false
 }
