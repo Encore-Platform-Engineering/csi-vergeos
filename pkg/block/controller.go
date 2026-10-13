@@ -81,17 +81,30 @@ func (c *BlockController) CreateVolume(ctx context.Context, req *csi.CreateVolum
 	if err != nil {
 		return nil, err
 	}
+	// Only an explicit required_bytes is a minimum; the default size is not.
+	var minBytes int64
+	if req.CapacityRange != nil {
+		minBytes = req.CapacityRange.RequiredBytes
+	}
 
 	driveName := driver.VolumeNamePrefix + req.Name
 	serial := deriveSerial(req.Name)
 
 	// Concurrent retries for the same name must not both create a drive.
-	defer c.locks.lock("create:" + driveName)()
+	unlock, err := c.locks.lock(ctx, "create:"+driveName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
-	// Idempotency: a drive is created on the pool VM and only moves to a node
-	// after a PV (hence a successful CreateVolume) exists, so a retry always
-	// finds it on the pool VM. One filtered call; no scan of other VMs, and
-	// drives of other clusters sharing this VergeOS are never considered.
+	// Idempotency: look only at the pool VM, with one filtered list call.
+	// Trade-off: a drive that already left the pool VM (published to a node,
+	// or parked on a previous pool VM) is not found, so a same-name retry
+	// would create a duplicate. That cannot happen in the Kubernetes flow: a
+	// drive is only published after CreateVolume succeeded and the PV exists,
+	// and the provisioner stops calling CreateVolume once it does. In return
+	// there is no O(VMs) scan and drives of other clusters sharing this
+	// VergeOS are never considered.
 	// Any list failure must abort: treating it as "not found" would create a
 	// duplicate drive.
 	existingDrives, err := c.vmDrives.List(ctx, c.poolMachineID)
@@ -109,13 +122,13 @@ func (c *BlockController) CreateVolume(ctx context.Context, req *csi.CreateVolum
 	case 0:
 	case 1:
 		d := existing[0]
-		if d.SizeBytes < sizeBytes || (limitBytes > 0 && d.SizeBytes > limitBytes) {
+		if (minBytes > 0 && d.SizeBytes < minBytes) || (limitBytes > 0 && d.SizeBytes > limitBytes) {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists with size %d bytes, incompatible with requested %d (limit %d)", req.Name, d.SizeBytes, sizeBytes, limitBytes)
 		}
 		klog.Infof("Block drive %q already exists on pool VM (id=%d), reusing (idempotent)", driveName, d.ID.Int())
 		return c.buildCreateResponse(d), nil
 	default:
-		return nil, status.Errorf(codes.Internal, "%d drives named %q exist on pool VM; refusing to guess", len(existing), driveName)
+		return nil, status.Errorf(codes.FailedPrecondition, "%d drives named %q exist on pool VM; refusing to guess", len(existing), driveName)
 	}
 
 	interfaceType := req.Parameters["interface"]
@@ -131,7 +144,7 @@ func (c *BlockController) CreateVolume(ctx context.Context, req *csi.CreateVolum
 		Serial:    serial,
 	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "creating VM drive: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "creating VM drive: %v", err)
 	}
 
 	klog.Infof("Created block drive %q (id=%d, serial=%s) on pool VM %d", driveName, drive.ID.Int(), serial, c.poolVMID)
@@ -161,12 +174,35 @@ func (c *BlockController) DeleteVolume(ctx context.Context, req *csi.DeleteVolum
 		return nil, status.Errorf(codes.InvalidArgument, "invalid volume ID: %v", err)
 	}
 
+	unlock, err := c.locks.lock(ctx, fmt.Sprintf("drive:%d", driveID))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	drive, err := c.vmDrives.Get(ctx, driveID)
+	if err != nil {
+		if vergeos.IsNotFoundError(err) {
+			klog.Infof("Block drive %d already deleted (idempotent)", driveID)
+			return &csi.DeleteVolumeResponse{}, nil
+		}
+		return nil, status.Errorf(codes.Unavailable, "getting drive %d: %v", driveID, err)
+	}
+	// Never delete a drive this driver did not create (static PV, stale ID, VM boot disk).
+	if !strings.HasPrefix(drive.Name, driver.VolumeNamePrefix) {
+		klog.Warningf("Drive %d (%q) is not a %q volume; refusing to delete it", driveID, drive.Name, driver.VolumeNamePrefix)
+		return &csi.DeleteVolumeResponse{}, nil
+	}
+	if drive.Machine != c.poolMachineID {
+		return nil, status.Errorf(codes.FailedPrecondition, "drive %d is still attached (machine %d); unpublish it before deleting", driveID, drive.Machine)
+	}
+
 	if err := c.vmDrives.Delete(ctx, driveID); err != nil {
 		if vergeos.IsNotFoundError(err) {
 			klog.Infof("Block drive %d already deleted (idempotent)", driveID)
 			return &csi.DeleteVolumeResponse{}, nil
 		}
-		return nil, status.Errorf(codes.Internal, "deleting VM drive %d: %v", driveID, err)
+		return nil, status.Errorf(codes.Unavailable, "deleting VM drive %d: %v", driveID, err)
 	}
 
 	klog.Infof("Deleted block drive %d", driveID)
@@ -260,7 +296,11 @@ func (c *BlockController) ControllerPublishVolume(ctx context.Context, req *csi.
 
 	// Serialize publish/unpublish of one drive so retries and concurrent
 	// calls cannot interleave between the move and the hotplug.
-	defer c.locks.lock(fmt.Sprintf("drive:%d", driveID))()
+	unlock, err := c.locks.lock(ctx, fmt.Sprintf("drive:%d", driveID))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	// Resolve the CSI node ID (uuid:/key:/name:) to a VergeOS VM.
 	target, err := c.resolveNodeVM(ctx, req.NodeId)
@@ -331,7 +371,11 @@ func (c *BlockController) ControllerUnpublishVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.InvalidArgument, "invalid volume ID: %v", err)
 	}
 
-	defer c.locks.lock(fmt.Sprintf("drive:%d", driveID))()
+	unlock, err := c.locks.lock(ctx, fmt.Sprintf("drive:%d", driveID))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	// Get drive to check current state.
 	drive, err := c.vmDrives.Get(ctx, driveID)
@@ -353,31 +397,43 @@ func (c *BlockController) ControllerUnpublishVolume(ctx context.Context, req *cs
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
 
-	// Find the VM that currently owns the drive.
-	var owner *nodeVMInfo
+	// Work out which VM currently holds the drive. A node ID that resolves to
+	// the holder is authoritative. Otherwise (no node ID, node VM gone, or a
+	// late call for a node that no longer holds the drive) look the holder up
+	// by the drive's machine so a drive stranded on a deleted VM still heals.
+	var node *nodeVMInfo
 	if req.NodeId != "" {
-		node, err := c.resolveNodeVM(ctx, req.NodeId)
+		n, err := c.resolveNodeVM(ctx, req.NodeId)
 		switch {
 		case err == nil:
-			if node.machineID != drive.Machine {
-				// Late or duplicate unpublish for a node that no longer
-				// holds the drive; it belongs to someone else now.
-				klog.Infof("Drive %d is not attached to node %q (machine %d, drive on machine %d); nothing to do", driveID, req.NodeId, node.machineID, drive.Machine)
-				return &csi.ControllerUnpublishVolumeResponse{}, nil
-			}
-			owner = node
+			node = n
 		case status.Code(err) == codes.NotFound:
-			klog.Infof("Node %q has no VergeOS VM; drive %d cannot be attached to it", req.NodeId, driveID)
-			return &csi.ControllerUnpublishVolumeResponse{}, nil
+			klog.Infof("Node %q has no VergeOS VM; locating the holder of drive %d by machine", req.NodeId, driveID)
 		default:
 			return nil, err
 		}
+	}
+
+	var owner *nodeVMInfo
+	if node != nil && node.machineID == drive.Machine {
+		owner = node
 	} else {
-		owner, err = c.vmForMachine(ctx, drive.Machine)
-		if err != nil && status.Code(err) != codes.NotFound {
+		holder, err := c.vmForMachine(ctx, drive.Machine)
+		switch {
+		case err == nil:
+			if req.NodeId != "" {
+				// Late or duplicate unpublish for a node that does not hold
+				// the drive; a live VM holds it now, leave it alone.
+				klog.Infof("Drive %d is held by VM %d, not node %q; nothing to do", driveID, holder.vmID, req.NodeId)
+				return &csi.ControllerUnpublishVolumeResponse{}, nil
+			}
+			owner = holder
+		case status.Code(err) == codes.NotFound:
+			// The holding VM is gone: nothing to unplug from, just move the
+			// drive back to the pool so it is not stranded.
+		default:
 			return nil, err
 		}
-		// NotFound: the owning VM is gone, so there is nothing to unplug from.
 	}
 
 	// Hot-unplug before moving. Never move a drive the guest may still have:

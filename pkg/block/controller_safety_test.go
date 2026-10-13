@@ -576,7 +576,7 @@ func TestCreate_DuplicateNamesOnPoolAreRejected(t *testing.T) {
 	fd.add(vergeos.VMDrive{ID: 1, Name: "csi-pvc", SizeBytes: 1 << 30, Machine: poolMachine})
 	fd.add(vergeos.VMDrive{ID: 2, Name: "csi-pvc", SizeBytes: 1 << 30, Machine: poolMachine})
 	_, err := c.CreateVolume(context.Background(), createReq("pvc", 1<<30, 0))
-	wantCode(t, err, codes.Internal)
+	wantCode(t, err, codes.FailedPrecondition)
 	if fd.creates != 0 {
 		t.Error("created a third drive")
 	}
@@ -622,7 +622,11 @@ func TestKeyedLock_SerializesPerKeyAndCleansUp(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			unlock := k.lock("a")
+			unlock, err := k.lock(context.Background(), "a")
+			if err != nil {
+				t.Error(err)
+				return
+			}
 			n := inside.Add(1)
 			if n > maxSeen.Load() {
 				maxSeen.Store(n)
@@ -636,8 +640,8 @@ func TestKeyedLock_SerializesPerKeyAndCleansUp(t *testing.T) {
 		t.Errorf("max concurrent holders = %d, want 1", maxSeen.Load())
 	}
 	// Different keys do not block each other.
-	u1 := k.lock("x")
-	u2 := k.lock("y")
+	u1, _ := k.lock(context.Background(), "x")
+	u2, _ := k.lock(context.Background(), "y")
 	u1()
 	u2()
 	if len(k.entries) != 0 {
@@ -673,4 +677,130 @@ func TestValidateVolumeCapabilities_NilAccessModeAndBlock(t *testing.T) {
 	if err != nil || resp.Confirmed == nil {
 		t.Errorf("RWO not confirmed: %v %v", resp, err)
 	}
+}
+
+// --- review follow-ups ---
+
+func TestUnpublish_DriveStrandedOnDeletedVMHealsToPool(t *testing.T) {
+	c, fd, _ := safetyController()
+	// Machine 999 belongs to no VM any more (node deleted).
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 999, PowerState: "online"})
+
+	if err := unpublish(c, "100", "name:node-gone"); err != nil {
+		t.Fatal(err)
+	}
+	if fd.unplugs != 0 {
+		t.Error("hot-unplug attempted on a VM that no longer exists")
+	}
+	if got := fd.get(100); got.Machine != poolMachine {
+		t.Fatalf("drive machine = %d, want pool %d", got.Machine, poolMachine)
+	}
+	// Self-healed: the drive can now be published elsewhere.
+	if err := publish(c, "100", "name:node-b"); err != nil {
+		t.Fatalf("publish after heal: %v", err)
+	}
+	if got := fd.get(100); got.Machine != nodeBMach || got.PowerState != "online" {
+		t.Errorf("drive = %+v", got)
+	}
+}
+
+func TestUnpublish_OwnerLookupErrorWithGoneNodeDoesNotMove(t *testing.T) {
+	c, fd, vms := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: 999})
+	vms.listFn = func(_ context.Context, opts ...vergeos.ListOption) ([]vergeos.VM, error) {
+		var o vergeos.ListOptions
+		for _, opt := range opts {
+			opt(&o)
+		}
+		if o.Filter == "machine eq 999 and is_snapshot eq false" {
+			return nil, errors.New("api down")
+		}
+		return nil, nil // node lookup: not found
+	}
+	wantCode(t, unpublish(c, "100", "name:node-gone"), codes.Unavailable)
+	if fd.updates != 0 {
+		t.Error("drive moved although its holder could not be determined")
+	}
+}
+
+func TestDelete_RefusesNonDriverDrive(t *testing.T) {
+	c, fd, _ := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "boot-disk", Machine: poolMachine})
+	if _, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "100"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fd.drives[100]; !ok {
+		t.Fatal("non-csi drive was deleted")
+	}
+}
+
+func TestDelete_RefusesAttachedDrive(t *testing.T) {
+	c, fd, _ := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: nodeAMach, PowerState: "online"})
+	_, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "100"})
+	wantCode(t, err, codes.FailedPrecondition)
+	if _, ok := fd.drives[100]; !ok {
+		t.Fatal("attached drive was deleted")
+	}
+}
+
+func TestDelete_PoolDriveAndMissingDrive(t *testing.T) {
+	c, fd, _ := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", Machine: poolMachine})
+	for i := 0; i < 2; i++ { // second call: already gone, still OK
+		if _, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "100"}); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if _, ok := fd.drives[100]; ok {
+		t.Fatal("pool drive not deleted")
+	}
+}
+
+func TestCreate_NoCapacityRangeAcceptsSmallerExisting(t *testing.T) {
+	c, fd, _ := safetyController()
+	fd.add(vergeos.VMDrive{ID: 100, Name: "csi-pvc", SizeBytes: 512 << 20, Machine: poolMachine})
+	resp, err := c.CreateVolume(context.Background(), createReq("pvc", 0, 0))
+	if err != nil {
+		t.Fatalf("no range must mean no minimum: %v", err)
+	}
+	if resp.Volume.VolumeId != "100" || fd.creates != 0 {
+		t.Errorf("resp=%v creates=%d", resp.Volume, fd.creates)
+	}
+}
+
+func TestKeyedLock_WaiterHonoursContext(t *testing.T) {
+	var k keyedLock
+	unlock, err := k.lock(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := k.lock(ctx, "a"); status.Code(err) != codes.Aborted {
+		t.Fatalf("err = %v, want Aborted", err)
+	}
+	unlock()
+	if len(k.entries) != 0 {
+		t.Errorf("%d lock entries leaked", len(k.entries))
+	}
+	// Lock is usable again.
+	u, err := k.lock(context.Background(), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u()
+}
+
+func TestCreate_CreateErrorIsUnavailable(t *testing.T) {
+	c, fd, _ := safetyController()
+	c.vmDrives = &createFailing{fakeDrives: fd}
+	_, err := c.CreateVolume(context.Background(), createReq("pvc", 1<<30, 0))
+	wantCode(t, err, codes.Unavailable)
+}
+
+type createFailing struct{ *fakeDrives }
+
+func (c *createFailing) Create(context.Context, int, *vergeos.VMDriveCreateRequest) (*vergeos.VMDrive, error) {
+	return nil, errors.New("api down")
 }

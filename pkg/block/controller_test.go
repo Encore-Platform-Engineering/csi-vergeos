@@ -230,7 +230,7 @@ func TestBlockCreateVolume_MissingName(t *testing.T) {
 
 func TestBlockDeleteVolume_Success(t *testing.T) {
 	c, driveMock := newTestBlockController()
-	driveMock.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-test-pvc"}
+	driveMock.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-test-pvc", Machine: 10}
 
 	_, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "100"})
 	if err != nil {
@@ -375,14 +375,15 @@ func TestBlockControllerPublishVolume_VMNotFound(t *testing.T) {
 
 func TestBlockDeleteVolume_APIError(t *testing.T) {
 	c, driveMock := newTestBlockController()
+	driveMock.drives[100] = &vergeos.VMDrive{ID: 100, Name: "csi-test-pvc", Machine: 10}
 	driveMock.deleteFn = func(_ context.Context, _ int) error {
 		return fmt.Errorf("connection refused")
 	}
 
 	_, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "100"})
 	st, _ := status.FromError(err)
-	if st.Code() != codes.Internal {
-		t.Errorf("expected Internal, got %v", err)
+	if st.Code() != codes.Unavailable {
+		t.Errorf("expected Unavailable, got %v", err)
 	}
 }
 
