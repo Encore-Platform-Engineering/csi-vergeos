@@ -22,6 +22,8 @@ if grep -rnE ':latest|vergeio|ghcr\.io/verge-io' "$CHART" deploy Makefile README
   fail "mutable or foreign image reference"
 fi
 appver=$(yq eval '.appVersion' $CHART/Chart.yaml)
+# chart version == appVersion, so on a tag (IMAGE_REF_TAG) chart, image and tag all match
+[ "$(yq eval '.version' $CHART/Chart.yaml)" = "$appver" ] || fail "Chart.yaml version != appVersion"
 want="$REPO:v$appver"
 [ -z "${IMAGE_REF_TAG:-}" ] || want="$REPO:$IMAGE_REF_TAG"
 for f in /tmp/chart-default.yaml deploy/kubernetes/node.yaml deploy/kubernetes/block-controller.yaml deploy/kubernetes/nas-controller.yaml; do
@@ -117,5 +119,10 @@ b=$(yq eval 'select(.metadata.name=="x-block-controller") | .spec.template.metad
 # mutually exclusive; block-disabled still renders for NAS
 if render --set vergeos.caBundle=x --set vergeos.caSecret=y >/dev/null 2>&1; then fail "caBundle + caSecret must be rejected"; fi
 render --set block.enabled=false --set vergeos.caSecret=my-ca | yq eval 'select(.metadata.name=="x-nas-controller") | .spec.template.spec.volumes[].name' - | gq -x vergeos-ca || fail "NAS-only CA volume"
+
+echo "== block StorageClass default annotation"
+blocksc='select(.kind=="StorageClass" and .provisioner=="csi-block.verge.io")'
+if yq eval "$blocksc | .metadata.annotations" /tmp/chart-default.yaml | gq is-default-class; then fail "block StorageClass is default without isDefault"; fi
+render --set block.storageClass.isDefault=true | yq eval "$blocksc | .metadata.annotations.\"storageclass.kubernetes.io/is-default-class\"" - | gq -x true || fail "isDefault=true must annotate the block StorageClass"
 
 echo OK

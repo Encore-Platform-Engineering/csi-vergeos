@@ -55,6 +55,7 @@ block:
   storageClass:
     enabled: true
     name: vergeos-block
+    isDefault: false  # mark as the cluster default StorageClass
     interface: "virtio-scsi"
     reclaimPolicy: Delete
     volumeBindingMode: Immediate

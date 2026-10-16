@@ -34,6 +34,31 @@ jobs:
           IMAGE_REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: hack/check-chart.sh
 
+  chart:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHART: charts/vergeos-csi
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5
+      - name: Tag must be v + chart version
+        run: |
+          v=$(yq eval '.version' "$CHART/Chart.yaml")
+          [ "$TAG" = "v$v" ] || { echo "::error::tag $TAG != v$v (Chart.yaml version)"; exit 1; }
+      - name: Package and push chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package "$CHART" -d "$RUNNER_TEMP"
+          printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "$RUNNER_TEMP/vergeos-csi-${TAG#v}.tgz" oci://ghcr.io/encore-platform-engineering/charts
+
   image:
     needs: test
     runs-on: ubuntu-latest
