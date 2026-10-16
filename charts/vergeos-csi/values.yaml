@@ -11,7 +11,7 @@ imagePullSecrets: []
 # - name: ghcr-credentials
 
 vergeos:
-  # Full URL including scheme, e.g. https://10.8.8.26
+  # Full URL including scheme, e.g. https://vergeos.example.net
   host: ""
   apiKey: ""
   verifySSL: "true"
