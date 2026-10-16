@@ -1,7 +1,7 @@
 questions:
   - variable: vergeos.host
     label: VergeOS Host URL
-    description: "Full URL including scheme (e.g. https://10.8.8.26)"
+    description: "Full URL including scheme (e.g. https://vergeos.example.net)"
     type: string
     required: true
     group: "VergeOS Connection"
