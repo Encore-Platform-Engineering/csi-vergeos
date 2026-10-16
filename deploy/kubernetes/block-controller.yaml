@@ -19,7 +19,7 @@ spec:
       containers:
         # CSI driver - Block controller mode
         - name: csi-vergeos
-          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.0
+          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.1
           args:
             - "--driver=block"
             - "--mode=controller"

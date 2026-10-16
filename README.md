@@ -111,6 +111,21 @@ helm install vergeos-csi verge-io/vergeos-csi \
   --set block.poolVmId=<POOL_VM_ID>
 ```
 
+### Install from OCI
+
+Each `v*` tag publishes the chart (version = tag without `v`) to `oci://ghcr.io/encore-platform-engineering/charts`. The package is private, so log in first (a token with `read:packages`):
+
+```bash
+helm registry login ghcr.io -u <GITHUB_USER>
+helm install vergeos-csi oci://ghcr.io/encore-platform-engineering/charts/vergeos-csi \
+  --version 0.1.1 --namespace kube-system \
+  --set vergeos.host=https://<VERGEOS_HOST> \
+  --set vergeos.apiKey=<API_KEY> \
+  --set block.poolVmId=<POOL_VM_ID>
+```
+
+`helm template` takes the same arguments.
+
 To install only the NAS driver (skip block):
 
 ```bash
@@ -144,6 +159,7 @@ Key Helm values:
 | `nas.enabled` | `true` | Deploy the NAS driver |
 | `block.enabled` | `true` | Deploy the Block driver |
 | `block.poolVmId` | | **Required** when block is enabled. VergeOS VM ID to hold idle block drives |
+| `block.storageClass.isDefault` | `false` | Annotate the block StorageClass as the cluster default (`storageclass.kubernetes.io/is-default-class`) |
 | `nas.storageClass.nasServiceName` | `k8s-nas` | VergeOS NAS service name |
 | `nas.storageClass.allowedHosts` | RFC1918 ranges | IPs/CIDRs allowed to mount NFS exports. **Narrow to your node subnets** |
 | `nas.storageClass.allowAll` | `false` | Export to every host (insecure; excludes `allowedHosts`) |
@@ -191,7 +207,7 @@ Block volumes support `fsType` `ext4` (default) and `xfs`; other types are rejec
 
 The manifests in `deploy/kubernetes/` are **default-kubelet-only** (`/var/lib/kubelet`). They are not templated. For k0s or any other kubelet dir, use the Helm chart (`kubeletDir`) or generate manifests with `helm template --set kubeletDir=<dir> charts/vergeos-csi`.
 
-Images are pinned to `ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.0`. The node DaemonSet has its own ServiceAccount (`get nodes` only) and does not receive the VergeOS credentials Secret; only the controllers do.
+Images are pinned to `ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.1`. The node DaemonSet has its own ServiceAccount (`get nodes` only) and does not receive the VergeOS credentials Secret; only the controllers do.
 
 Apply the manifests in `deploy/kubernetes/` directly. You'll need to create a `vergeos-credentials` Secret manually:
 
