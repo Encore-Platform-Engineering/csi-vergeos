@@ -125,4 +125,10 @@ blocksc='select(.kind=="StorageClass" and .provisioner=="csi-block.verge.io")'
 if yq eval "$blocksc | .metadata.annotations" /tmp/chart-default.yaml | gq is-default-class; then fail "block StorageClass is default without isDefault"; fi
 render --set block.storageClass.isDefault=true | yq eval "$blocksc | .metadata.annotations.\"storageclass.kubernetes.io/is-default-class\"" - | gq -x true || fail "isDefault=true must annotate the block StorageClass"
 
+echo "== CSIDriver fsGroupPolicy"
+for f in /tmp/chart-default.yaml deploy/kubernetes/csidriver.yaml; do
+  q "$f" 'select(.kind=="CSIDriver" and .metadata.name=="csi-block.verge.io") | .spec.fsGroupPolicy' | gq -x File || fail "$f: block CSIDriver fsGroupPolicy must be File"
+  q "$f" 'select(.kind=="CSIDriver" and .metadata.name=="csi-nas.verge.io") | .spec.fsGroupPolicy' | gq -x None || fail "$f: NAS CSIDriver fsGroupPolicy must be None"
+done
+
 echo OK

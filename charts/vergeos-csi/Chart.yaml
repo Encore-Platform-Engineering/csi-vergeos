@@ -2,5 +2,5 @@ apiVersion: v2
 name: vergeos-csi
 description: VergeOS CSI Driver for Kubernetes — NAS (NFS/EXT4) and Block (VM drive) storage
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.1.2
+appVersion: "0.1.2"
