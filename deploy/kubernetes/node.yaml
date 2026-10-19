@@ -23,7 +23,7 @@ spec:
       containers:
         # --- NAS Node Driver ---
         - name: csi-vergeos-nas
-          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.1
+          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.2
           args:
             - "--driver=nas"
             - "--mode=node"
@@ -64,7 +64,7 @@ spec:
 
         # --- Block Node Driver ---
         - name: csi-vergeos-block
-          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.1
+          image: ghcr.io/encore-platform-engineering/csi-vergeos:v0.1.2
           args:
             - "--driver=block"
             - "--mode=node"

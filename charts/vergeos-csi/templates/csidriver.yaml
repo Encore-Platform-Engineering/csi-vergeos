@@ -6,6 +6,8 @@ metadata:
 spec:
   attachRequired: false
   podInfoOnMount: false
+  # NFS: no fsGroup chown (squash/export settings decide ownership)
+  fsGroupPolicy: None
   volumeLifecycleModes:
     - Persistent
 {{- end }}
@@ -18,6 +20,9 @@ metadata:
 spec:
   attachRequired: true
   podInfoOnMount: false
+  # kubelet applies the pod fsGroup on every mount; PVs carry no fsType, so the
+  # default ReadWriteOnceWithFSType would skip it (non-root pods can't write)
+  fsGroupPolicy: File
   volumeLifecycleModes:
     - Persistent
 {{- end }}
