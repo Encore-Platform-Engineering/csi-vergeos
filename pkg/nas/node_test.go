@@ -187,13 +187,15 @@ func TestNodeGetCapabilities_NAS(t *testing.T) {
 	node, _ := newTestNode()
 	caps := node.NodeGetCapabilities()
 
-	// NAS should NOT advertise STAGE_UNSTAGE_VOLUME.
+	has := map[csi.NodeServiceCapability_RPC_Type]bool{}
 	for _, cap := range caps {
-		if rpc := cap.GetRpc(); rpc != nil {
-			if rpc.Type == csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME {
-				t.Error("NAS node should not advertise STAGE_UNSTAGE_VOLUME")
-			}
-		}
+		has[cap.GetRpc().GetType()] = true
+	}
+	if has[csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME] {
+		t.Error("NAS node should not advertise STAGE_UNSTAGE_VOLUME")
+	}
+	if !has[csi.NodeServiceCapability_RPC_GET_VOLUME_STATS] {
+		t.Error("NAS node should advertise GET_VOLUME_STATS")
 	}
 }
 
