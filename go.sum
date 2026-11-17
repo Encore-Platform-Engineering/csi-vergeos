@@ -20,12 +20,6 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/verge-io/govergeos v0.1.6 h1:u+CYt2Cnbh3DoblmnoNUoY4Njqa+9tScgX/Dfq1zwjo=
-github.com/verge-io/govergeos v0.1.6/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
-github.com/verge-io/govergeos v0.1.7 h1:hyE5q123lM/n0DS2V4ux50uGiG52WntjI/F5hNKT4lQ=
-github.com/verge-io/govergeos v0.1.7/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
-github.com/verge-io/govergeos v0.1.8 h1:5AnakAhppC3JO6mkfDLB5VrwwQtrdFATEyejPFl86qI=
-github.com/verge-io/govergeos v0.1.8/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
 github.com/verge-io/govergeos v0.1.9 h1:GwdtRA3R7I+FASlMLEB1xcWHB8eeYY9oQ1GNmhp0Rkk=
 github.com/verge-io/govergeos v0.1.9/go.mod h1:iMDZ50feEQ57fuqGmvtsAUUYYBz000nQ8kqI4Y8bT8U=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
