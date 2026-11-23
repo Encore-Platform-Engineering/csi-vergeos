@@ -6,12 +6,16 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// statsInFlight holds the volume paths with a NodeGetVolumeStats call still running.
+var statsInFlight sync.Map
 
 // NodeGetVolumeStats reports usage for a published volume. It is backend-agnostic:
 // filesystem volumes are statfs'd, raw block volumes report the device size.
@@ -23,6 +27,12 @@ func (ns *NodeService) NodeGetVolumeStats(_ context.Context, req *csi.NodeGetVol
 	if path == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume path is required")
 	}
+	// A hard NFS mount with a dead server blocks stat forever; let at most one
+	// call per path hang instead of one per kubelet poll.
+	if _, busy := statsInFlight.LoadOrStore(path, struct{}{}); busy {
+		return nil, status.Errorf(codes.Unavailable, "volume stats for %s already in progress", path)
+	}
+	defer statsInFlight.Delete(path)
 	fi, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, status.Errorf(codes.NotFound, "volume path %s does not exist", path)

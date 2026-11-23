@@ -142,6 +142,18 @@ func TestNodeService_GetVolumeStats(t *testing.T) {
 			t.Errorf("%s: expected %v, got %v", name, tc.code, err)
 		}
 	}
+
+	// A call still hung on the same path (dead NFS server) is not stacked.
+	busy := t.TempDir()
+	statsInFlight.Store(busy, struct{}{})
+	_, err = ns.NodeGetVolumeStats(ctx, &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: busy})
+	statsInFlight.Delete(busy)
+	if status.Code(err) != codes.Unavailable {
+		t.Errorf("in-flight path: expected Unavailable, got %v", err)
+	}
+	if _, err := ns.NodeGetVolumeStats(ctx, &csi.NodeGetVolumeStatsRequest{VolumeId: "v", VolumePath: busy}); err != nil {
+		t.Errorf("path after in-flight call finished: %v", err)
+	}
 }
 
 func TestNodeService_GetVolumeStatsRawBlock(t *testing.T) {
