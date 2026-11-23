@@ -299,16 +299,15 @@ func TestNodeGetCapabilities_Block(t *testing.T) {
 	node, _, _ := newTestBlockNode()
 	caps := node.NodeGetCapabilities()
 
-	hasStage := false
+	has := map[csi.NodeServiceCapability_RPC_Type]bool{}
 	for _, cap := range caps {
-		if rpc := cap.GetRpc(); rpc != nil {
-			if rpc.Type == csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME {
-				hasStage = true
-			}
-		}
+		has[cap.GetRpc().GetType()] = true
 	}
-	if !hasStage {
+	if !has[csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME] {
 		t.Error("block node should advertise STAGE_UNSTAGE_VOLUME")
+	}
+	if !has[csi.NodeServiceCapability_RPC_GET_VOLUME_STATS] {
+		t.Error("block node should advertise GET_VOLUME_STATS")
 	}
 }
 

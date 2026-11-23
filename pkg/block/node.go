@@ -261,5 +261,12 @@ func (n *BlockNode) NodeGetCapabilities() []*csi.NodeServiceCapability {
 				},
 			},
 		},
+		{
+			Type: &csi.NodeServiceCapability_Rpc{
+				Rpc: &csi.NodeServiceCapability_RPC{
+					Type: csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
+				},
+			},
+		},
 	}
 }

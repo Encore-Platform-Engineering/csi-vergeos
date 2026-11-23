@@ -109,7 +109,15 @@ func (n *NASNode) NodeUnstageVolume(_ context.Context, _ *csi.NodeUnstageVolumeR
 
 func (n *NASNode) NodeGetCapabilities() []*csi.NodeServiceCapability {
 	// NAS does NOT advertise STAGE_UNSTAGE_VOLUME — NFS doesn't need staging.
-	return []*csi.NodeServiceCapability{}
+	return []*csi.NodeServiceCapability{
+		{
+			Type: &csi.NodeServiceCapability_Rpc{
+				Rpc: &csi.NodeServiceCapability_RPC{
+					Type: csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
+				},
+			},
+		},
+	}
 }
 
 // nfsMountOptions merges StorageClass mountOptions with the driver defaults.

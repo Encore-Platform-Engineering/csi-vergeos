@@ -203,6 +203,8 @@ helm upgrade --install csi charts/vergeos-csi ... --set-file vergeos.caBundle=ve
 
 Block volumes support `fsType` `ext4` (default) and `xfs`; other types are rejected with `InvalidArgument`. StorageClass `mountOptions` are passed to the filesystem mount. `volumeMode: Block` is supported on the block driver with `ReadWriteOnce` (the device node is bind-mounted into the pod, never formatted) and rejected by the NAS driver. Read-only raw block (`SINGLE_NODE_READER_ONLY`, `readOnly: true`) is rejected: a read-only bind mount does not stop writes to a device node.
 
+**Volume stats.** Both node plugins advertise `GET_VOLUME_STATS`, so kubelet exports `kubelet_volume_stats_*` for their PVCs: filesystem volumes report bytes and inodes (`statfs`), raw block volumes report the device size only.
+
 **fsGroup.** The `csi-block.verge.io` CSIDriver sets `fsGroupPolicy: File`, so kubelet applies a pod's `securityContext.fsGroup` to the volume on every mount: non-root pods (e.g. `runAsUser: 1000`, `fsGroup: 1000`) can write to the root of a block PVC. The `csi-nas.verge.io` CSIDriver sets `fsGroupPolicy: None`: kubelet never chowns NFS volumes; ownership is governed by the StorageClass `squash` setting. Upgrading from 0.1.1 patches the existing CSIDriver in place (the field is mutable on current Kubernetes); it takes effect when a volume is next mounted, so restart pods that already failed.
 
 ### Raw manifests

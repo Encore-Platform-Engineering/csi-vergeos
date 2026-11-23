@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/container-storage-interface/spec v1.12.0
 	github.com/verge-io/govergeos v0.1.9
+	golang.org/x/sys v0.39.0
 	google.golang.org/grpc v1.79.1
 	google.golang.org/protobuf v1.36.10
 	k8s.io/klog/v2 v2.130.1
@@ -16,7 +17,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/moby/sys/mountinfo v0.7.2 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 )
